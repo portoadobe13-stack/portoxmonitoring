@@ -22,7 +22,8 @@ _HTML = r"""<!doctype html>
 <style>
   body{margin:0;font-family:system-ui,sans-serif;font-size:14px;color:#31333f}
   #label{margin:0 0 6px}
-  video,img{width:100%;border-radius:8px;background:#000;display:none}
+  #app{padding:0 0 2px}
+  video,img{width:100%;max-height:340px;object-fit:contain;border-radius:8px;background:#000;display:none}
   .row{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
   button{flex:1;min-width:110px;padding:12px 8px;font-size:15px;border:1px solid #bbb;
          border-radius:8px;background:#fff;color:#31333f}
@@ -31,6 +32,7 @@ _HTML = r"""<!doctype html>
   [hidden]{display:none!important}
 </style></head>
 <body>
+<div id="app">
 <div id="label"></div>
 <video id="v" playsinline muted autoplay></video>
 <img id="still" alt="foto">
@@ -42,6 +44,7 @@ _HTML = r"""<!doctype html>
 </div>
 <div id="msg"></div>
 <canvas id="c" hidden></canvas>
+</div>
 <script>
 const $ = id => document.getElementById(id);
 const video = $("v"), still = $("still"), msg = $("msg");
@@ -50,9 +53,14 @@ let stream = null, facing = "environment";
 function send(type, data) {
   window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, data || {}), "*");
 }
+let lastH = -1;
 function fit() {
-  setTimeout(() => send("streamlit:setFrameHeight", {height: document.documentElement.scrollHeight + 6}), 60);
+  const h = Math.ceil($("app").getBoundingClientRect().height) + 2;
+  if (h !== lastH) { lastH = h; send("streamlit:setFrameHeight", {height: h}); }
 }
+if (window.ResizeObserver) new ResizeObserver(fit).observe($("app"));
+still.onload = fit;
+video.onloadedmetadata = fit;
 function show(state) {            // state: idle | live | done
   video.style.display = state === "live" ? "block" : "none";
   still.style.display = state === "done" ? "block" : "none";
