@@ -1,8 +1,17 @@
 import streamlit as st
 import pandas as pd
 from datetime import date
+import time
 from supabase import create_client
-from groq import Groq
+
+try:
+    from groq import Groq
+except ImportError:
+    Groq = None
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
 
 import ocr_core as oc
 from rear_camera import rear_camera_input
@@ -11,14 +20,20 @@ st.set_page_config(page_title="Porto X Factory System", page_icon="🩴",
                    layout="wide", initial_sidebar_state="expanded")
 
 # secrets.toml: SUPABASE_URL, SUPABASE_KEY (anon/publishable key, BUKAN service_role),
-#               GROQ_API_KEY, (opsional) GROQ_VISION_MODEL
-VISION_MODEL = st.secrets.get("GROQ_VISION_MODEL", oc.DEFAULT_VISION_MODEL)
+#   Mesin OCR (isi salah satu atau keduanya): ANTHROPIC_API_KEY, GROQ_API_KEY
+#   Opsional: OCR_PROVIDER ("claude" | "groq", default claude), GROQ_VISION_MODEL,
+#             CLAUDE_FAST_MODEL, CLAUDE_STRONG_MODEL, MOBILE_CAMERA_ONLY
+GROQ_MODEL = st.secrets.get("GROQ_VISION_MODEL", oc.DEFAULT_VISION_MODEL)
+CLAUDE_FAST = st.secrets.get("CLAUDE_FAST_MODEL", oc.DEFAULT_CLAUDE_FAST)
+CLAUDE_STRONG = st.secrets.get("CLAUDE_STRONG_MODEL", oc.DEFAULT_CLAUDE_STRONG)
+OCR_DEFAULT = str(st.secrets.get("OCR_PROVIDER", "claude")).lower()
 # Di HP: foto wajib dari kamera (tidak bisa pilih galeri). Di PC: pilih file. Set false di secrets untuk mematikan.
 MOBILE_CAMERA_ONLY = bool(st.secrets.get("MOBILE_CAMERA_ONLY", True))
 
 # Siapa boleh apa (role 'pending' tidak boleh apa-apa)
 FORM_ROLES = ("foreman", "admin")
 DASHBOARD_ROLES = ("admin",)
+OCR_CHOOSER_ROLES = FORM_ROLES      # siapa yang boleh ganti mesin OCR; isi ("admin",) untuk mengunci
 
 
 def is_mobile():
@@ -33,6 +48,26 @@ def is_mobile():
 @st.cache_resource
 def get_groq():
     return Groq(api_key=st.secrets["GROQ_API_KEY"])
+
+
+@st.cache_resource
+def get_claude():
+    return anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"], timeout=60.0)
+
+
+def get_client(provider):
+    return get_claude() if provider == "claude" else get_groq()
+
+
+def available_engines():
+    """label -> (provider, model). Hanya yang API key-nya diisi dan library-nya terpasang."""
+    eng = {}
+    if anthropic is not None and "ANTHROPIC_API_KEY" in st.secrets:
+        eng[f"Claude · {CLAUDE_FAST}"] = ("claude", CLAUDE_FAST)
+        eng[f"Claude · {CLAUDE_STRONG}"] = ("claude", CLAUDE_STRONG)
+    if Groq is not None and "GROQ_API_KEY" in st.secrets:
+        eng[f"Groq · {GROQ_MODEL}"] = ("groq", GROQ_MODEL)
+    return eng
 
 
 # ----------------------------------------------------------------------
@@ -97,7 +132,7 @@ def col_config(frames_name, df):
     return cfg
 
 
-def render_slot(gen, machine, page, number):
+def render_slot(gen, machine, page, number, engine):
     meta = oc.PAGE_META[page]
     sk = f"{machine}|{page}"
     slot = st.session_state.slots.setdefault(sk, {"ocr": None, "scan_no": 0, "verified": None})
@@ -123,15 +158,22 @@ def render_slot(gen, machine, page, number):
             if not use_cam:
                 st.image(cached[2], width=320)
             if st.button("⚡ Scan foto ini", key=f"scan_{gen}_{sk}"):
-                with st.spinner("Groq sedang membaca foto..."):
-                    values, err = oc.scan_with_groq(get_groq(), VISION_MODEL, page, img)
-                if err:
-                    st.error(f"❌ {err}")
+                if engine is None:
+                    st.error("Mesin OCR belum diatur. Isi ANTHROPIC_API_KEY dan/atau GROQ_API_KEY di secrets.")
                 else:
-                    slot.update(ocr=values, scan_no=slot["scan_no"] + 1, verified=None)
+                    elabel, provider, model = engine
+                    with st.spinner(f"{elabel} sedang membaca foto..."):
+                        t0 = time.perf_counter()
+                        values, err, usage = oc.scan_image(provider, get_client(provider), model, page, img)
+                        secs = time.perf_counter() - t0
+                    if err:
+                        st.error(f"❌ {err}")
+                    else:
+                        slot.update(ocr=values, scan_no=slot["scan_no"] + 1, verified=None,
+                                    info={"engine": elabel, "model": model, "secs": secs, "usage": usage})
         elif slot["ocr"] is None:
             if st.button("✍️ Isi manual (tanpa foto)", key=f"manual_{gen}_{sk}"):
-                slot.update(ocr={}, scan_no=slot["scan_no"] + 1, verified=None)
+                slot.update(ocr={}, scan_no=slot["scan_no"] + 1, verified=None, info=None)
                 st.rerun()
 
         if slot["ocr"] is None:
@@ -141,6 +183,16 @@ def render_slot(gen, machine, page, number):
         total = oc.expected_cells(page)
         st.caption(f"Terbaca {filled} dari {total} sel. **Cocokkan dengan foto, koreksi langsung di tabel, "
                    f"lalu klik Verifikasi.**")
+        info = slot.get("info")
+        if info:
+            bits = [f"Dibaca oleh **{info['engine']}** dalam **{info['secs']:.1f} dtk**"]
+            use = info.get("usage")
+            if use and use.get("in") is not None:
+                bits.append(f"{use['in']} token masuk / {use['out']} keluar")
+            cost = oc.estimate_cost(info["model"], use)
+            if cost is not None:
+                bits.append(f"≈ ${cost:.4f} (perkiraan)")
+            st.caption(" · ".join(bits))
 
         frames = oc.make_frames(page, slot["ocr"])
         edited = {}
@@ -259,9 +311,22 @@ def page_form(sb, master):
 
     st.markdown("---")
     st.subheader(f"📷 Scan layar HMI: {machine}")
-    st.caption(f"Model vision: `{VISION_MODEL}`. Tiap slot: upload foto → Scan → cek & koreksi → Verifikasi.")
+    engines = available_engines()
+    engine = None
+    if engines:
+        labels = list(engines)
+        default_idx = next((i for i, l in enumerate(labels) if engines[l][0] == OCR_DEFAULT), 0)
+        if st.session_state.profile["role"] in OCR_CHOOSER_ROLES and len(labels) > 1:
+            elabel = st.sidebar.selectbox("🔎 Mesin OCR", labels, index=default_idx, key="ocr_engine")
+        else:
+            elabel = labels[default_idx]
+        engine = (elabel, *engines[elabel])
+        st.caption(f"Mesin OCR: **{elabel}**. Tiap slot: foto → Scan → cek & koreksi → Verifikasi.")
+    else:
+        st.error("Belum ada mesin OCR. Isi ANTHROPIC_API_KEY dan/atau GROQ_API_KEY di secrets "
+                 "(dan pastikan paket `anthropic` / `groq` ada di requirements.txt). Anda tetap bisa Isi manual.")
     for n, page in enumerate(oc.PAGE_ORDER, start=1):
-        render_slot(gen, machine, page, n)
+        render_slot(gen, machine, page, n, engine)
     include_doors, doors, door_errors = render_doors(gen, machine, master["skus"])
 
     st.markdown("---")
