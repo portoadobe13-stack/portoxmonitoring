@@ -18,7 +18,14 @@ DOORS = list(range(1, 7))            # mesin ini punya 6 stasiun/pintu
 INJ_LABEL = {1: "Injector I", 2: "Injector II"}
 # Model vision Groq berganti cepat (Llama 4 Scout/Maverick sudah ditutup 2026).
 # Bisa ditimpa lewat secrets: GROQ_VISION_MODEL
-DEFAULT_VISION_MODEL = "qwen/qwen3.8-27b"
+DEFAULT_VISION_MODEL = "qwen/qwen3.8-27b"          # Groq
+DEFAULT_CLAUDE_FAST = "claude-haiku-5-5"            # murah & cepat
+DEFAULT_CLAUDE_STRONG = "claude-sonnet-5-5"         # lebih teliti
+# Harga USD per 1 juta token (input, output) - PERKIRAAN dari situs pelacak harga, cek claude.com/pricing.
+PRICES_USD_PER_MTOK = {
+    "claude-haiku-5-5": (0.10, 0.50),
+    "claude-sonnet-5-5": (2.00, 10.00),
+}
 
 
 @dataclass(frozen=True)
@@ -161,10 +168,14 @@ def prepare_image(file_like, max_side=1600):
     return img
 
 
-def image_to_data_url(img, quality=90):
+def image_to_b64(img, quality=90):
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=quality)
-    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def image_to_data_url(img, quality=90):
+    return "data:image/jpeg;base64," + image_to_b64(img, quality)
 
 
 # ----------------------------------------------------------------------
@@ -179,7 +190,7 @@ def build_prompt(page):
         for k in keys:
             p = PARAMS[k]
             extra = "ON atau OFF" if p.vtype == "onoff" else (f"angka, {p.unit}" if p.unit else "angka")
-            out.append(f'  - "{k}": {p.label} ({extra})')
+            out.append(f"  {k}: {p.label} ({extra})")
         return "\n".join(out)
 
     parts = [
@@ -188,25 +199,28 @@ def build_prompt(page):
         "",
         "Baca SEMUA angka persis seperti tertulis di layar. Angka berawalan nol berarti angka biasa "
         "(\"070\" -> 70, \"07.00\" -> 7.0, \"000\" -> 0). Jangan menebak: jika sebuah angka tidak terbaca "
-        "jelas, isi null.",
+        "jelas, isi null. Tetap isi null supaya urutan kolom tidak bergeser.",
         "",
     ]
     example = {"status": "success"}
     if dk:
-        parts += ["Per pintu/station (door_no 1 sampai 6), isi:", describe(dk), ""]
-        example["doors"] = [{"door_no": 1, **{k: None for k in dk}}, "... sampai door_no 6"]
+        parts += ["\"doors\": satu baris array untuk tiap station 1-6. Tiap baris berurutan: "
+                  "[door_no, " + ", ".join(dk) + "]", describe(dk), ""]
+        example["doors"] = [[d] + [None] * len(dk) for d in DOORS]
     if ik:
-        parts += ["Per injector (\"1\" = Injector I, \"2\" = Injector II), isi:", describe(ik), ""]
-        example["injectors"] = {"1": {k: None for k in ik}, "2": {k: None for k in ik}}
+        parts += ["\"injectors\": kunci \"1\" = Injector I, \"2\" = Injector II. Tiap isi array berurutan: "
+                  "[" + ", ".join(ik) + "]", describe(ik), ""]
+        example["injectors"] = {"1": [None] * len(ik), "2": [None] * len(ik)}
     if mk:
-        parts += ["Nilai tunggal (satu per mesin), isi:", describe(mk), ""]
-        example["machine"] = {k: None for k in mk}
+        parts += ["\"machine\": satu array nilai tunggal berurutan: [" + ", ".join(mk) + "]", describe(mk), ""]
+        example["machine"] = [None] * len(mk)
     parts += [
-        "Jawab HANYA dengan satu objek JSON dengan bentuk (ganti null dengan nilai yang dibaca):",
-        json.dumps(example, ensure_ascii=False, indent=1),
+        "Jawab HANYA dengan satu objek JSON, ditulis dalam SATU baris tanpa spasi, indentasi, atau komentar. "
+        "Bentuk (ganti null dengan nilai yang dibaca):",
+        json.dumps(example, ensure_ascii=False, separators=(",", ":")),
         "",
         'Jika foto BUKAN layar tersebut, terlalu buram, atau terpotong sehingga tabel tidak bisa dibaca, jawab: '
-        '{"status": "error", "message": "alasan singkat"}',
+        '{"status":"error","message":"alasan singkat"}',
     ]
     return "\n".join(parts)
 
@@ -244,29 +258,47 @@ def clean_value(key, raw):
 
 
 def parse_response(page, js):
-    """JSON model -> {(key, idx): nilai}. Hanya key milik halaman ini yang diterima."""
+    """JSON model -> {(key, idx): nilai}. Menerima baris array (format kompak) maupun objek berlabel.
+    Hanya key milik halaman ini yang diterima."""
     values = {}
     dk, ik, mk = keys_of(page, "door"), keys_of(page, "injector"), keys_of(page, "machine")
 
     doors = js.get("doors") or []
-    if isinstance(doors, dict):
-        doors = [{"door_no": k, **v} for k, v in doors.items()]
-    for row in doors:
+    if isinstance(doors, dict):          # {"1": [...]} atau {"1": {...}}
+        doors = [([k] + list(v)) if isinstance(v, (list, tuple)) else {"door_no": k, **v}
+                 for k, v in doors.items()]
+    for pos, row in enumerate(doors, start=1):
+        if isinstance(row, dict):
+            d, cells = row.get("door_no"), {k: row.get(k) for k in dk}
+        elif isinstance(row, (list, tuple)):
+            if len(row) == len(dk) + 1:
+                d, arr = row[0], row[1:]
+            else:                        # tanpa door_no -> pakai urutan baris
+                d, arr = pos, row
+            cells = dict(zip(dk, arr))
+        else:
+            continue
         try:
-            d = int(row.get("door_no"))
+            d = int(d)
         except (TypeError, ValueError):
             continue
         if d in DOORS:
             for k in dk:
-                values[(k, d)] = clean_value(k, row.get(k))
+                values[(k, d)] = clean_value(k, cells.get(k))
 
     inj = js.get("injectors") or {}
+    if isinstance(inj, (list, tuple)):
+        inj = {str(i + 1): r for i, r in enumerate(inj)}
     for i in (1, 2):
         row = inj.get(str(i)) or inj.get(i) or {}
+        if isinstance(row, (list, tuple)):
+            row = dict(zip(ik, row))
         for k in ik:
             values[(k, i)] = clean_value(k, row.get(k))
 
     mach = js.get("machine") or {}
+    if isinstance(mach, (list, tuple)):
+        mach = dict(zip(mk, mach))
     for k in mk:
         values[(k, 0)] = clean_value(k, mach.get(k))
     return values
@@ -279,7 +311,7 @@ def expected_cells(page):
 
 
 def scan_with_groq(client, model, page, img):
-    """Return (values, error_message). Tidak melempar exception."""
+    """Return (values, error_message, usage). Tidak melempar exception."""
     messages = [{
         "role": "user",
         "content": [
@@ -287,7 +319,7 @@ def scan_with_groq(client, model, page, img):
             {"type": "image_url", "image_url": {"url": image_to_data_url(img)}},
         ],
     }]
-    base = dict(model=model, messages=messages, temperature=0, max_completion_tokens=2000)
+    base = dict(model=model, messages=messages, temperature=0, max_completion_tokens=600)
     # Urutan percobaan: mode non-thinking + JSON mode -> tanpa JSON mode -> tanpa parameter reasoning
     attempts = [
         dict(response_format={"type": "json_object"}, extra_body={"reasoning_effort": "none"}),
@@ -295,7 +327,7 @@ def scan_with_groq(client, model, page, img):
         dict(response_format={"type": "json_object"}),
         dict(),
     ]
-    js, last_err = None, None
+    js, last_err, comp = None, None, None
     for extra in attempts:
         try:
             comp = client.chat.completions.create(**base, **extra)
@@ -305,19 +337,81 @@ def scan_with_groq(client, model, page, img):
             last_err = e
             if any(t in str(e).lower() for t in ("model_not_found", "decommission", "429", "rate_limit")):
                 break                      # ganti model / tunggu limit, bukan masalah parameter
+    u = getattr(comp, "usage", None)
+    usage = ({"in": getattr(u, "prompt_tokens", None), "out": getattr(u, "completion_tokens", None)}
+             if u is not None else None)
     if js is None:
         msg = f"Gagal memanggil/menafsirkan jawaban Groq: {last_err}"
+        if "Request too large" in str(last_err):
+            return None, ("Permintaan melebihi batas token Groq untuk akun ini. "
+                          f"Detail: {last_err}"), None
         if "429" in str(last_err) or "rate_limit" in str(last_err).lower():
             return None, ("Batas pemakaian Groq tercapai (per menit atau per hari). Tunggu 1 menit lalu scan lagi; "
                           "kalau tetap gagal, kuota harian free tier kemungkinan habis (reset tiap hari). "
-                          f"Detail: {last_err}")
+                          f"Detail: {last_err}"), None
         if "model_not_found" in str(last_err):
             msg += (f"\n\nModel '{model}' tidak tersedia untuk akun ini. Isi GROQ_VISION_MODEL di "
                     "secrets dengan model vision yang aktif (lihat console.groq.com/docs/vision).")
-        return None, msg
+        return None, msg, None
     if js.get("status") != "success":
-        return None, js.get("message", "Foto tidak valid")
-    return parse_response(page, js), None
+        return None, js.get("message", "Foto tidak valid"), usage
+    return parse_response(page, js), None, usage
+
+
+def _claude_error(e, model):
+    status = getattr(e, "status_code", None)
+    text = str(e)
+    low = text.lower()
+    if "credit balance" in low:
+        return "Saldo kredit Claude habis. Isi ulang di Claude Console → Billing."
+    if status == 401 or "authentication" in low or "invalid x-api-key" in low:
+        return "ANTHROPIC_API_KEY salah atau tidak aktif. Periksa di secrets dan di Claude Console."
+    if status == 404 or "not_found" in low:
+        return (f"Model '{model}' tidak tersedia untuk akun ini. Ganti lewat secrets "
+                "(CLAUDE_FAST_MODEL / CLAUDE_STRONG_MODEL) dengan model yang aktif.")
+    if status == 429:
+        return f"Batas pemakaian Claude tercapai. Tunggu sebentar lalu scan lagi. Detail: {text}"
+    if status in (500, 502, 503, 529) or "overloaded" in low:
+        return "Server Claude sedang sibuk. Coba scan lagi beberapa detik lagi."
+    return f"Gagal memanggil/menafsirkan jawaban Claude: {text}"
+
+
+def scan_with_claude(client, model, page, img):
+    """Return (values, error_message, usage). Gambar ditaruh SEBELUM teks (anjuran Anthropic)."""
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                         "data": image_to_b64(img)}},
+            {"type": "text", "text": build_prompt(page)},
+        ],
+    }]
+    try:
+        # temperature sengaja tidak dikirim: sebagian model Claude terbaru menolak parameter sampling
+        resp = client.messages.create(model=model, max_tokens=600, messages=messages)
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+        js = extract_json(text)
+        usage = {"in": resp.usage.input_tokens, "out": resp.usage.output_tokens}
+    except Exception as e:
+        return None, _claude_error(e, model), None
+    if js.get("status") != "success":
+        return None, js.get("message", "Foto tidak valid"), usage
+    return parse_response(page, js), None, usage
+
+
+def scan_image(provider, client, model, page, img):
+    """provider: 'claude' | 'groq'. Return (values, error, usage)."""
+    if provider == "claude":
+        return scan_with_claude(client, model, page, img)
+    return scan_with_groq(client, model, page, img)
+
+
+def estimate_cost(model, usage):
+    """USD per scan, atau None kalau harga model tidak diketahui."""
+    price = PRICES_USD_PER_MTOK.get(model)
+    if not price or not usage or usage.get("in") is None or usage.get("out") is None:
+        return None
+    return (usage["in"] * price[0] + usage["out"] * price[1]) / 1_000_000
 
 
 # ----------------------------------------------------------------------
