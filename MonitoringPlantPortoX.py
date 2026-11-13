@@ -5,6 +5,7 @@ from supabase import create_client
 from groq import Groq
 
 import ocr_core as oc
+from rear_camera import rear_camera_input
 
 st.set_page_config(page_title="Porto X Factory System", page_icon="🩴",
                    layout="wide", initial_sidebar_state="expanded")
@@ -104,14 +105,23 @@ def render_slot(gen, machine, page, number):
 
     with st.expander(f"{icon} {number}. {meta['title']}", expanded=slot["verified"] is None):
         label = f"Foto layar: {meta['screen']}"
-        if MOBILE_CAMERA_ONLY and is_mobile():
-            up = st.camera_input(label, key=f"cam_{gen}_{sk}")
+        use_cam = MOBILE_CAMERA_ONLY and is_mobile()
+        if use_cam:
+            up, fid = rear_camera_input(label, key=f"cam_{gen}_{sk}")   # kamera belakang
         else:
             up = st.file_uploader(label, type=["jpg", "jpeg", "png"], key=f"up_{gen}_{sk}")
+            fid = (getattr(up, "file_id", None) or (up.name, up.size)) if up else None
         if up:
-            img = oc.prepare_image(up)
-            if not (MOBILE_CAMERA_ONLY and is_mobile()):
-                st.image(img, width=320)
+            # Foto hanya diproses SEKALI per file (skrip Streamlit dijalankan ulang di tiap klik)
+            cached = slot.get("img")
+            if cached is None or cached[0] != fid:
+                full = oc.prepare_image(up)
+                thumb = full.copy()
+                thumb.thumbnail((640, 640))
+                cached = slot["img"] = (fid, full, thumb)
+            img = cached[1]
+            if not use_cam:
+                st.image(cached[2], width=320)
             if st.button("⚡ Scan foto ini", key=f"scan_{gen}_{sk}"):
                 with st.spinner("Groq sedang membaca foto..."):
                     values, err = oc.scan_with_groq(get_groq(), VISION_MODEL, page, img)
