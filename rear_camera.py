@@ -29,6 +29,7 @@ _HTML = r"""<!doctype html>
          border-radius:8px;background:#fff;color:#31333f}
   button.primary{background:#ff4b4b;border-color:#ff4b4b;color:#fff}
   #msg{color:#b00020;margin-top:6px}
+  #ver{color:#999;font-size:11px;margin-top:6px}
   [hidden]{display:none!important}
 </style></head>
 <body>
@@ -43,6 +44,7 @@ _HTML = r"""<!doctype html>
   <button id="retake" hidden>↩ Ulangi foto</button>
 </div>
 <div id="msg"></div>
+<div id="ver">kamera v3</div>
 <canvas id="c" hidden></canvas>
 </div>
 <script>
@@ -55,8 +57,8 @@ function send(type, data) {
 }
 let lastH = -1;
 function fit() {
-  const h = Math.ceil($("app").getBoundingClientRect().height) + 2;
-  if (h !== lastH) { lastH = h; send("streamlit:setFrameHeight", {height: h}); }
+  const h = Math.min(700, Math.ceil($("app").getBoundingClientRect().height) + 2);
+  if (Math.abs(h - lastH) >= 2) { lastH = h; send("streamlit:setFrameHeight", {height: h}); }
 }
 if (window.ResizeObserver) new ResizeObserver(fit).observe($("app"));
 still.onload = fit;
@@ -125,10 +127,10 @@ show("idle");
 
 _component = None
 try:
-    _dir = Path(tempfile.gettempdir()) / "porto_rear_camera"
+    _dir = Path(tempfile.gettempdir()) / "porto_rear_camera_v3"
     _dir.mkdir(parents=True, exist_ok=True)
     (_dir / "index.html").write_text(_HTML, encoding="utf-8")
-    _component = components.declare_component("porto_rear_camera", path=str(_dir))
+    _component = components.declare_component("porto_rear_camera_v3", path=str(_dir))
 except Exception:
     _component = None
 
