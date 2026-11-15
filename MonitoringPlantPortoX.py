@@ -16,6 +16,7 @@ except ImportError:
 import ocr_core as oc
 import materials as mt
 import shift_result as sr
+import session_cookie as sc
 from rear_camera import rear_camera_input
 
 st.set_page_config(page_title="Porto X Factory System", page_icon="🩴",
@@ -76,20 +77,64 @@ def available_engines():
 # Login (schema memakai RLS: tanpa login, semua insert/select ditolak)
 # Klien Supabase dibuat PER SESI supaya login satu orang tidak terbawa ke orang lain.
 # ----------------------------------------------------------------------
+def restore_login():
+    """Pulihkan login dari cookie setelah halaman di-refresh. True kalau berhasil."""
+    if st.session_state.get("_logged_out") or st.session_state.get("_restore_failed"):
+        return False
+    rt = sc.read_token()
+    if not rt:
+        return False
+    try:
+        sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+        res = sb.auth.refresh_session(rt)
+        prof = sb.table("profiles").select("full_name, role").eq("id", res.user.id).single().execute().data
+    except Exception:
+        st.session_state["_restore_failed"] = True     # cookie basi/dicabut: jangan dicoba lagi di sesi ini
+        sc.forget()
+        return False
+    st.session_state.sb, st.session_state.profile = sb, prof
+    return True
+
+
+def keep_cookie_fresh(sb):
+    """Refresh token Supabase berganti tiap diperbarui; simpan yang terbaru ke cookie.
+    get_session() sekaligus memperbarui access token yang kedaluwarsa (1 jam).
+    Return False kalau sesi sudah tidak berlaku (mis. dicabut), supaya foreman diminta login lagi."""
+    try:
+        sess = sb.auth.get_session()
+    except Exception:
+        sess = None
+    if sess is None:
+        return False
+    if sess.refresh_token != st.session_state.get("_rt_written"):
+        sc.remember(sess.refresh_token)
+        st.session_state["_rt_written"] = sess.refresh_token
+    return True
+
+
 def login_sidebar():
     with st.sidebar:
         st.title("🩴 Porto X Production")
+        if "sb" not in st.session_state:
+            restore_login()
         if "sb" in st.session_state:
             prof = st.session_state.profile
+            if not keep_cookie_fresh(st.session_state.sb):
+                st.session_state.clear()
+                st.session_state["_logged_out"] = True
+                st.rerun()
             st.caption(f"👤 {prof.get('full_name') or '-'}  ·  role: **{prof['role']}**")
             if st.button("Keluar"):
                 try:
-                    st.session_state.sb.auth.sign_out()
+                    st.session_state.sb.auth.sign_out({"scope": "local"})   # hanya perangkat ini
                 except Exception:
                     pass
                 st.session_state.clear()
+                st.session_state["_logged_out"] = True
                 st.rerun()
             return True
+        if st.session_state.get("_logged_out"):
+            sc.forget()                                  # hapus cookie ingat-login di browser ini
         with st.form("login"):
             email = st.text_input("Email")
             pw = st.text_input("Password", type="password")
@@ -98,6 +143,7 @@ def login_sidebar():
                     sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
                     res = sb.auth.sign_in_with_password({"email": email, "password": pw})
                     prof = sb.table("profiles").select("full_name, role").eq("id", res.user.id).single().execute().data
+                    st.session_state.clear()             # buang penanda lama (_logged_out, _restore_failed)
                     st.session_state.sb, st.session_state.profile = sb, prof
                     st.rerun()
                 except Exception as e:
