@@ -14,6 +14,8 @@ except ImportError:
     anthropic = None
 
 import ocr_core as oc
+import materials as mt
+import shift_result as sr
 from rear_camera import rear_camera_input
 
 st.set_page_config(page_title="Porto X Factory System", page_icon="🩴",
@@ -238,18 +240,34 @@ def sku_picker(skus, key):
     return int(s_lab[s]) if s else None
 
 
-def render_doors(gen, machine, skus):
-    """Return (include, doors_list, errors)."""
-    with st.expander("🌡️ 6. Suhu Cetakan per Pintu (input manual)", expanded=False):
-        include = st.checkbox("Sertakan suhu cetakan di laporan ini", value=True, key=f"inc_{gen}_{machine}")
+def render_doors(gen, machine, skus, report_type):
+    """Return (include, doors_list, errors). Laporan awal: section wajib + Vacuum check tiap pintu."""
+    awal = report_type == "awal"
+    title = ("🌡️ 6. Suhu Cetakan & Vacuum Check per Pintu (wajib)" if awal
+             else "🌡️ 6. Suhu Cetakan per Pintu (input manual)")
+    with st.expander(title, expanded=awal):
+        if awal:
+            include = True
+            st.caption("Laporan awal shift: suhu cetakan dan Vacuum check wajib diisi untuk setiap pintu.")
+        else:
+            include = st.checkbox("Sertakan suhu cetakan di laporan ini", value=True, key=f"inc_{gen}_{machine}")
         doors, errors = [], []
         if not include:
             return False, doors, errors
         for d in oc.DOORS:
             k = f"door_{gen}_{machine}_{d}"
             st.markdown(f"**Pintu {d}**")
-            if st.checkbox(f"Pintu {d} idle (tidak jalan)", key=f"{k}_idle"):
-                doors.append({"door_no": d, "idle": True})
+            idle = st.checkbox(f"Pintu {d} idle (tidak jalan)", key=f"{k}_idle")
+            vac = None
+            if awal:
+                # sengaja tanpa nilai awal: foreman harus memilih sendiri tiap pintu
+                vac = st.selectbox("Vacuum check", ["aktif", "nonaktif"], index=None,
+                                   placeholder="Pilih status", key=f"{k}_vac")
+                if vac is None:
+                    errors.append(f"Pintu {d}: Vacuum check wajib dipilih")
+            if idle:
+                doors.append({"door_no": d, "idle": True, "vacuum_check": vac})
+                st.divider()
                 continue
             sku_id = sku_picker(skus, k)
             c1, c2, c3 = st.columns(3)
@@ -273,9 +291,78 @@ def render_doors(gen, machine, skus):
             doors.append({"door_no": d, "idle": False, "sku_id": sku_id, "side": side,
                           "sv_upper": svu, "sv_lower": svl,
                           "pv_upper_ok": pvu_ok, "pv_upper": pvu,
-                          "pv_lower_ok": pvl_ok, "pv_lower": pvl})
+                          "pv_lower_ok": pvl_ok, "pv_lower": pvl,
+                          "vacuum_check": vac})
             st.divider()
     return True, doors, errors
+
+
+# ----------------------------------------------------------------------
+# Bahan per sak (tabel report_materials)
+# ----------------------------------------------------------------------
+def render_materials(gen, report_date):
+    """Form bahan dinamis. Return list {"type","qty","date"} (divalidasi di mt.clean_rows saat simpan)."""
+    rk, nk = f"matrows_{gen}", f"matnext_{gen}"
+    if rk not in st.session_state:
+        st.session_state[rk] = [{"id": 1, "type": "L"}, {"id": 2, "type": "S"}]
+        st.session_state[nk] = 3
+    st.markdown("**🧪 Bahan (per sak)**")
+    st.caption("Isi jenis bahan, jumlah sak, dan tanggal bahan. Satu jenis boleh punya beberapa baris "
+               "kalau tanggalnya berbeda. Baris yang dikosongkan diabaikan.")
+    rows_state = st.session_state[rk]
+    out = []
+    for r in list(rows_state):
+        c1, c2, c3 = st.columns([1, 1, 1.4])
+        t = c1.selectbox("Bahan", list(mt.MATERIAL_TYPES), index=mt.MATERIAL_TYPES.index(r["type"]),
+                         key=f"mat_t_{gen}_{r['id']}")
+        q = c2.number_input("Jumlah (sak)", min_value=0.0, step=0.5, value=None, placeholder="mis. 3",
+                            key=f"mat_q_{gen}_{r['id']}")
+        d = c3.date_input("Tanggal bahan", value=None, format="DD/MM/YYYY", key=f"mat_d_{gen}_{r['id']}")
+        if len(rows_state) > 1 and st.button("🗑 Hapus baris ini", key=f"mat_x_{gen}_{r['id']}"):
+            rows_state.remove(r)
+            st.rerun()
+        out.append({"type": t, "qty": q, "date": d})
+    if st.button("➕ Tambah baris bahan", key=f"mat_add_{gen}"):
+        rows_state.append({"id": st.session_state[nk], "type": "L"})
+        st.session_state[nk] += 1
+        st.rerun()
+    return out
+
+
+# ----------------------------------------------------------------------
+# Hasil produksi akhir shift (cycle count, qty hasil -> yield dihitung database)
+# ----------------------------------------------------------------------
+def render_result(gen, machine):
+    st.markdown("**📦 Hasil Produksi Shift**")
+    st.caption("Diisi di akhir shift. Yield = Qty hasil ÷ Cycle count, dihitung otomatis di database saat disimpan.")
+    c1, c2 = st.columns(2)
+    cyc = c1.number_input("Cycle count", min_value=0, step=1, value=None, placeholder="mis. 100",
+                          key=f"cyc_{gen}_{machine}")
+    qty = c2.number_input("Qty hasil", min_value=0, step=1, value=None, placeholder="mis. 68",
+                          key=f"qty_{gen}_{machine}")
+    cyc = int(cyc) if cyc is not None else None
+    qty = int(qty) if qty is not None else None
+    y = sr.calc_yield(cyc, qty)
+    if y is not None:
+        st.info(f"Yield: **{y:.1f}%**")
+    _, warns = sr.validate_result(cyc, qty)
+    for w in warns:
+        st.warning(w)
+    return cyc, qty
+
+
+def schema_ready(sb):
+    """Pastikan 05_vacuum_check_dan_yield.sql sudah dijalankan; kalau belum, data vacuum/yield
+    akan diam-diam hilang (fungsi lama mengabaikan field yang tidak dikenal)."""
+    if st.session_state.get("schema05"):
+        return True
+    try:
+        sb.table("setting_reports").select("cycle_count").limit(1).execute()
+        sb.table("door_mould_temps").select("vacuum_check").limit(1).execute()
+    except Exception:
+        return False
+    st.session_state["schema05"] = True
+    return True
 
 
 # ----------------------------------------------------------------------
@@ -304,10 +391,11 @@ def page_form(sb, master):
     change_reason = c6.selectbox("Alasan perubahan",
                                  ["ganti_bahan", "ganti_warna_tipe", "bs_tinggi", "trial", "lainnya"],
                                  disabled=report_type != "perubahan")
-    c7, c8 = st.columns(2)
-    material_mix = c7.text_input("Campuran bahan L dan S (mis. L60:S40)")
-    material_date = c8.date_input("Tanggal bahan", value=None)
+    mat_rows = render_materials(gen, report_date)
     notes = st.text_input("Catatan (opsional)")
+    cycle_count = qty_hasil = None
+    if report_type == "akhir":
+        cycle_count, qty_hasil = render_result(gen, machine)
 
     st.markdown("---")
     st.subheader(f"📷 Scan layar HMI: {machine}")
@@ -327,7 +415,7 @@ def page_form(sb, master):
                  "(dan pastikan paket `anthropic` / `groq` ada di requirements.txt). Anda tetap bisa Isi manual.")
     for n, page in enumerate(oc.PAGE_ORDER, start=1):
         render_slot(gen, machine, page, n, engine)
-    include_doors, doors, door_errors = render_doors(gen, machine, master["skus"])
+    include_doors, doors, door_errors = render_doors(gen, machine, master["skus"], report_type)
 
     st.markdown("---")
     st.subheader("💾 Simpan ke database")
@@ -340,11 +428,21 @@ def page_form(sb, master):
         st.write("**Belum diverifikasi (tidak ikut disimpan):** " + ", ".join(pending))
 
     if st.button("💾 Simpan Laporan Setting Mesin", type="primary"):
+        if report_type in ("awal", "akhir") and not schema_ready(sb):
+            st.error("Database belum diperbarui untuk Vacuum check dan hasil produksi. Jalankan "
+                     "05_vacuum_check_dan_yield.sql di Supabase → SQL Editor, lalu coba simpan lagi. "
+                     "(Laporan belum disimpan.)")
+            return
         errs = list(door_errors) if include_doors else []
+        if report_type == "akhir":
+            errs += sr.validate_result(cycle_count, qty_hasil)[0]
         if not verified and not (include_doors and doors):
             errs.append("Belum ada data yang diverifikasi.")
         if report_type == "perubahan" and not change_reason:
             errs.append("Alasan perubahan wajib untuk laporan 'perubahan'.")
+        mat_payload, mat_errors = mt.clean_rows(mat_rows, report_date,
+                                                required=report_type in ("awal", "perubahan"))
+        errs += mat_errors
         if errs:
             st.error("Belum bisa disimpan:\n\n" + "\n".join(f"- {e}" for e in errs))
             return
@@ -356,22 +454,32 @@ def page_form(sb, master):
             "machine_id": master["machines"][machine], "report_date": str(report_date), "shift": shift,
             "team": team, "report_type": report_type,
             "change_reason": change_reason if report_type == "perubahan" else None,
-            "material_mix": material_mix or None,
-            "material_date": str(material_date) if material_date else None,
+            "material_mix": mt.summary(mat_payload),     # ringkasan teks otomatis dari baris bahan
+            "material_date": None,                        # tanggal per bahan ada di report_materials
             "notes": notes or None,
+            "cycle_count": cycle_count if report_type == "akhir" else None,
+            "qty_hasil": qty_hasil if report_type == "akhir" else None,
         }
         try:
             rid = sb.rpc("submit_setting_report", {
                 "p_report": meta, "p_values": value_rows,
                 "p_doors": doors if include_doors else [],
+                "p_materials": mat_payload,
             }).execute().data
             st.success(f"Laporan #{rid} tersimpan ({len(value_rows)} nilai setting"
-                       f"{', ' + str(len(doors)) + ' pintu' if include_doors else ''}).")
+                       f"{', ' + str(len(doors)) + ' pintu' if include_doors else ''}"
+                       f"{', ' + str(len(mat_payload)) + ' baris bahan' if mat_payload else ''}"
+                       f"{', yield ' + format(sr.calc_yield(cycle_count, qty_hasil), '.1f') + '%' if report_type == 'akhir' else ''}).")
             st.session_state.slots, st.session_state.gen = {}, gen + 1
             st.button("Buat laporan baru")
         except Exception as e:
             msg = str(e)
-            if "setting_reports_awal_akhir_uq" in msg or "duplicate key" in msg:
+            if "p_materials" in msg or "report_materials" in msg and "does not exist" in msg:
+                st.error("Database belum diperbarui untuk bahan per sak. Jalankan 04_bahan_per_sak.sql "
+                         "di Supabase → SQL Editor, lalu coba simpan lagi.")
+            elif "report_materials" in msg and "duplicate key" in msg:
+                st.error("Ada bahan dengan jenis dan tanggal yang sama. Gabungkan jumlahnya jadi satu baris.")
+            elif "setting_reports_awal_akhir_uq" in msg or "duplicate key" in msg:
                 st.error(f"Laporan '{report_type}' untuk {machine} / {report_date} / shift {shift} sudah ada.")
             else:
                 st.error(f"Gagal menyimpan: {msg}")
@@ -386,9 +494,15 @@ def page_dashboard(sb):
         return
     st.header("📊 Dashboard Analisa Produksi Porto X")
     try:
-        res = sb.table("setting_reports").select(
-            "id, report_date, shift, team, report_type, change_reason, material_mix, created_at, machines(code)"
-        ).order("created_at", desc=True).limit(30).execute().data
+        base = "id, report_date, shift, team, report_type, change_reason, material_mix"
+        try:
+            res = sb.table("setting_reports").select(
+                base + ", cycle_count, qty_hasil, yield_pct, created_at, machines(code)"
+            ).order("created_at", desc=True).limit(30).execute().data
+        except Exception:     # database belum dimigrasi 05
+            res = sb.table("setting_reports").select(
+                base + ", created_at, machines(code)"
+            ).order("created_at", desc=True).limit(30).execute().data
     except Exception as e:
         st.error(f"Gagal memuat: {e}")
         return
@@ -405,6 +519,21 @@ def page_dashboard(sb):
     ).eq("report_id", rid).order("param_key").order("idx").execute().data
     if vals:
         st.dataframe(pd.DataFrame(vals))
+    try:
+        mats = sb.table("report_materials").select("material_type, qty_sak, material_date") \
+            .eq("report_id", rid).order("material_type").order("material_date").execute().data
+        if mats:
+            st.markdown("**Bahan laporan ini**")
+            st.dataframe(pd.DataFrame(mats))
+    except Exception:
+        st.caption("Data bahan per sak belum tersedia (jalankan 04_bahan_per_sak.sql).")
+    try:
+        door_rows = sb.table("door_mould_temps").select("*").eq("report_id", rid).order("door_no").execute().data
+        if door_rows:
+            st.markdown("**Suhu cetakan & vacuum check per pintu**")
+            st.dataframe(pd.DataFrame(door_rows).drop(columns=["report_id"], errors="ignore"))
+    except Exception:
+        pass
 
 
 # ----------------------------------------------------------------------
