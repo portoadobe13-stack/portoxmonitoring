@@ -222,7 +222,15 @@ def render_slot(gen, machine, page, number, engine):
 # ----------------------------------------------------------------------
 # Suhu cetakan per pintu (input manual foreman, tabel door_mould_temps)
 # ----------------------------------------------------------------------
-def sku_picker(skus, key):
+def sku_picker(skus, key, default_sku=None):
+    """Dropdown Tipe > Warna > Size. default_sku (sku_id) mengisi ketiga dropdown di awal, masih bisa diubah."""
+    if default_sku is not None and f"{key}_m" not in st.session_state:
+        hit = skus[skus.sku_id == default_sku]
+        if not hit.empty:
+            r = hit.iloc[0]
+            st.session_state[f"{key}_m"] = f"{r.model_name} ({r.model_code})"
+            st.session_state[f"{key}_c"] = f"{r.color_name} ({r.color_code})"
+            st.session_state[f"{key}_s"] = f"{r.size_label} ({r.variant})"
     c1, c2, c3 = st.columns(3)
     models = skus[["model_code", "model_name"]].drop_duplicates().sort_values("model_code")
     m_lab = {f"{r.model_name} ({r.model_code})": r.model_code for r in models.itertuples()}
@@ -330,34 +338,101 @@ def render_materials(gen, report_date):
 
 
 # ----------------------------------------------------------------------
-# Hasil produksi akhir shift (cycle count, qty hasil -> yield dihitung database)
+# Hasil produksi akhir shift PER PINTU
+#   cycle count per pintu (dari HMI) + qty hasil per SKU (dibagi rata ke pintu yang SKU-nya sama)
 # ----------------------------------------------------------------------
-def render_result(gen, machine):
-    st.markdown("**📦 Hasil Produksi Shift**")
-    st.caption("Diisi di akhir shift. Yield = Qty hasil ÷ Cycle count, dihitung otomatis di database saat disimpan.")
-    c1, c2 = st.columns(2)
-    cyc = c1.number_input("Cycle count", min_value=0, step=1, value=None, placeholder="mis. 100",
-                          key=f"cyc_{gen}_{machine}")
-    qty = c2.number_input("Qty hasil", min_value=0, step=1, value=None, placeholder="mis. 68",
-                          key=f"qty_{gen}_{machine}")
-    cyc = int(cyc) if cyc is not None else None
-    qty = int(qty) if qty is not None else None
-    y = sr.calc_yield(cyc, qty)
-    if y is not None:
-        st.info(f"Yield: **{y:.1f}%**")
-    _, warns = sr.validate_result(cyc, qty)
+def awal_doors(sb, machine_id, report_date, shift):
+    """SKU dan status idle tiap pintu dari laporan awal shift yang sama (untuk mengisi awal form). {} kalau tidak ada
+    atau tidak boleh dibaca (mis. 03_batasi_baca_foreman.sql aktif); foreman lalu memilih SKU manual."""
+    try:
+        rep = sb.table("setting_reports").select("id").eq("machine_id", machine_id) \
+            .eq("report_date", str(report_date)).eq("shift", shift).eq("report_type", "awal").limit(1).execute().data
+        if not rep:
+            return {}
+        rows = sb.table("door_mould_temps").select("door_no, idle, sku_id").eq("report_id", rep[0]["id"]).execute().data
+        return {r["door_no"]: r for r in rows}
+    except Exception:
+        return {}
+
+
+def sku_label(skus, sku_id):
+    hit = skus[skus.sku_id == sku_id]
+    if hit.empty:
+        return f"SKU #{sku_id}"
+    r = hit.iloc[0]
+    return f"{r.model_name} {r.color_name} {r.size_label} ({r.variant})"
+
+
+def render_results(gen, machine, machine_id, report_date, shift, skus, sb):
+    """Return (payload, errors). payload = {"doors": [...], "skus": [...]} untuk RPC p_results."""
+    st.markdown("**📦 Hasil Produksi Shift per Pintu**")
+    st.caption("Diisi di akhir shift. Cycle count per pintu dibaca dari HMI mesin. Qty hasil diisi per SKU (size) "
+               "untuk semua pintu yang memproduksi SKU itu; kalau ada dua pintu dengan SKU sama, qty-nya dibagi rata "
+               "ke kedua pintu. Yield dihitung otomatis di database.")
+    pk = f"awalpref_{gen}_{machine}_{report_date}_{shift}"
+    if pk not in st.session_state:
+        st.session_state[pk] = awal_doors(sb, machine_id, report_date, shift)
+    pref = st.session_state[pk]
+    if pref:
+        st.caption("SKU tiap pintu diisi dari laporan awal shift. Ubah kalau pintu itu ganti SKU di tengah shift.")
+    rows, errors = [], []
+    for d in oc.DOORS:
+        k = f"res_{gen}_{machine}_{d}"
+        p = pref.get(d, {})
+        st.markdown(f"**Pintu {d}**")
+        idle = st.checkbox(f"Pintu {d} idle (tidak jalan)", value=bool(p.get("idle")), key=f"{k}_idle")
+        if idle:
+            st.divider()
+            continue
+        sku_id = sku_picker(skus, k, p.get("sku_id"))
+        cyc = st.number_input("Cycle count (HMI)", min_value=0, step=1, value=None, placeholder="mis. 100",
+                              key=f"{k}_cyc")
+        if sku_id is None:
+            errors.append(f"Pintu {d}: SKU belum dipilih (atau centang idle)")
+        if cyc is None or cyc < 1:
+            errors.append(f"Pintu {d}: cycle count wajib diisi (atau centang idle)")
+        if sku_id is not None and cyc is not None and cyc >= 1:
+            rows.append({"door_no": d, "sku_id": sku_id, "cycle_count": int(cyc)})
+        st.divider()
+
+    qty = {}
+    groups = sr.group_doors(rows)
+    if groups:
+        st.markdown("**Qty hasil per SKU**")
+        for sid, ds in groups.items():
+            q = st.number_input(f"{sku_label(skus, sid)}  |  pintu {', '.join(str(x['door_no']) for x in ds)}",
+                                min_value=0, step=1, value=None, placeholder="total qty SKU ini",
+                                key=f"resq_{gen}_{machine}_{sid}")
+            qty[sid] = int(q) if q is not None else None
+    e2, warns = sr.validate_results(rows, qty)
+    errors += [e for e in e2 if e not in errors]
     for w in warns:
         st.warning(w)
-    return cyc, qty
+
+    prev = sr.preview(rows, qty)
+    if prev and all(x["qty_door"] is not None for x in prev):
+        st.dataframe(pd.DataFrame([{
+            "Pintu": x["door_no"], "SKU": sku_label(skus, x["sku_id"]), "Cycle": x["cycle_count"],
+            "Pintu dgn SKU sama": x["doors_same_sku"], "Qty pintu": x["qty_door"],
+            "Yield pintu %": x["yield_door"], "Yield SKU %": x["yield_sku"]} for x in prev]), hide_index=True)
+        tot = sr.shift_yield(rows, qty)
+        if tot:
+            st.info(f"Yield mesin: **{tot[2]:.1f}%** (qty {tot[1]} ÷ cycle {tot[0]})")
+        if any(x["doors_same_sku"] > 1 for x in prev):
+            st.caption("Pintu yang SKU-nya sama berbagi qty, jadi yield pintu hanya perkiraan. "
+                       "Yield SKU lebih tepat untuk pintu-pintu itu.")
+    payload = {"doors": rows, "skus": [{"sku_id": sid, "qty_hasil": q} for sid, q in qty.items() if q is not None]}
+    return payload, errors
 
 
 def schema_ready(sb):
-    """Pastikan 05_vacuum_check_dan_yield.sql sudah dijalankan; kalau belum, data vacuum/yield
-    akan diam-diam hilang (fungsi lama mengabaikan field yang tidak dikenal)."""
+    """Pastikan 05_vacuum_check_dan_hasil_per_pintu.sql sudah dijalankan; kalau belum, data vacuum dan
+    hasil produksi akan diam-diam hilang (fungsi lama mengabaikan field yang tidak dikenal)."""
     if st.session_state.get("schema05"):
         return True
     try:
-        sb.table("setting_reports").select("cycle_count").limit(1).execute()
+        sb.table("report_door_results").select("report_id").limit(1).execute()
+        sb.table("report_sku_output").select("report_id").limit(1).execute()
         sb.table("door_mould_temps").select("vacuum_check").limit(1).execute()
     except Exception:
         return False
@@ -393,9 +468,10 @@ def page_form(sb, master):
                                  disabled=report_type != "perubahan")
     mat_rows = render_materials(gen, report_date)
     notes = st.text_input("Catatan (opsional)")
-    cycle_count = qty_hasil = None
+    results, result_errors = {}, []
     if report_type == "akhir":
-        cycle_count, qty_hasil = render_result(gen, machine)
+        results, result_errors = render_results(gen, machine, master["machines"][machine], report_date, shift,
+                                                master["skus"], sb)
 
     st.markdown("---")
     st.subheader(f"📷 Scan layar HMI: {machine}")
@@ -429,13 +505,13 @@ def page_form(sb, master):
 
     if st.button("💾 Simpan Laporan Setting Mesin", type="primary"):
         if report_type in ("awal", "akhir") and not schema_ready(sb):
-            st.error("Database belum diperbarui untuk Vacuum check dan hasil produksi. Jalankan "
-                     "05_vacuum_check_dan_yield.sql di Supabase → SQL Editor, lalu coba simpan lagi. "
+            st.error("Database belum diperbarui untuk Vacuum check dan hasil produksi per pintu. Jalankan "
+                     "05_vacuum_check_dan_hasil_per_pintu.sql di Supabase → SQL Editor, lalu coba simpan lagi. "
                      "(Laporan belum disimpan.)")
             return
         errs = list(door_errors) if include_doors else []
         if report_type == "akhir":
-            errs += sr.validate_result(cycle_count, qty_hasil)[0]
+            errs += result_errors
         if not verified and not (include_doors and doors):
             errs.append("Belum ada data yang diverifikasi.")
         if report_type == "perubahan" and not change_reason:
@@ -457,19 +533,18 @@ def page_form(sb, master):
             "material_mix": mt.summary(mat_payload),     # ringkasan teks otomatis dari baris bahan
             "material_date": None,                        # tanggal per bahan ada di report_materials
             "notes": notes or None,
-            "cycle_count": cycle_count if report_type == "akhir" else None,
-            "qty_hasil": qty_hasil if report_type == "akhir" else None,
         }
         try:
             rid = sb.rpc("submit_setting_report", {
                 "p_report": meta, "p_values": value_rows,
                 "p_doors": doors if include_doors else [],
                 "p_materials": mat_payload,
+                "p_results": results if report_type == "akhir" else {},
             }).execute().data
             st.success(f"Laporan #{rid} tersimpan ({len(value_rows)} nilai setting"
                        f"{', ' + str(len(doors)) + ' pintu' if include_doors else ''}"
                        f"{', ' + str(len(mat_payload)) + ' baris bahan' if mat_payload else ''}"
-                       f"{', yield ' + format(sr.calc_yield(cycle_count, qty_hasil), '.1f') + '%' if report_type == 'akhir' else ''}).")
+                       f"{', hasil ' + str(len(results['doors'])) + ' pintu' if report_type == 'akhir' else ''}).")
             st.session_state.slots, st.session_state.gen = {}, gen + 1
             st.button("Buat laporan baru")
         except Exception as e:
@@ -494,15 +569,9 @@ def page_dashboard(sb):
         return
     st.header("📊 Dashboard Analisa Produksi Porto X")
     try:
-        base = "id, report_date, shift, team, report_type, change_reason, material_mix"
-        try:
-            res = sb.table("setting_reports").select(
-                base + ", cycle_count, qty_hasil, yield_pct, created_at, machines(code)"
-            ).order("created_at", desc=True).limit(30).execute().data
-        except Exception:     # database belum dimigrasi 05
-            res = sb.table("setting_reports").select(
-                base + ", created_at, machines(code)"
-            ).order("created_at", desc=True).limit(30).execute().data
+        res = sb.table("setting_reports").select(
+            "id, report_date, shift, team, report_type, change_reason, material_mix, created_at, machines(code)"
+        ).order("created_at", desc=True).limit(30).execute().data
     except Exception as e:
         st.error(f"Gagal memuat: {e}")
         return
@@ -527,6 +596,22 @@ def page_dashboard(sb):
             st.dataframe(pd.DataFrame(mats))
     except Exception:
         st.caption("Data bahan per sak belum tersedia (jalankan 04_bahan_per_sak.sql).")
+    try:
+        yr = sb.table("v_door_yield").select(
+            "door_no, sku_code, cycle_count, doors_same_sku, qty_sku_total, qty_door, yield_door_pct, "
+            "yield_sku_pct, shared_sku, sku_changed, sv_upper, sv_lower, vacuum_check"
+        ).eq("report_id", rid).order("door_no").execute().data
+        if yr:
+            sy = sb.table("v_shift_yield").select("total_cycle, total_qty, yield_pct").eq("report_id", rid).execute().data
+            st.markdown("**Hasil produksi per pintu (laporan akhir)**")
+            if sy:
+                st.metric("Yield mesin", f"{sy[0]['yield_pct']}%",
+                          f"qty {sy[0]['total_qty']} ÷ cycle {sy[0]['total_cycle']}", delta_color="off")
+            st.dataframe(pd.DataFrame(yr), hide_index=True)
+            st.caption("sv_upper/sv_lower dan vacuum_check diambil dari laporan awal shift yang sama. "
+                       "shared_sku = pintu berbagi SKU (pakai yield_sku_pct); sku_changed = SKU pintu berubah sejak awal shift.")
+    except Exception:
+        pass
     try:
         door_rows = sb.table("door_mould_temps").select("*").eq("report_id", rid).order("door_no").execute().data
         if door_rows:
