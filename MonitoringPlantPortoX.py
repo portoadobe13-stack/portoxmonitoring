@@ -387,16 +387,29 @@ def render_materials(gen, report_date):
 # Hasil produksi akhir shift PER PINTU
 #   cycle count per pintu (dari HMI) + qty hasil per SKU (dibagi rata ke pintu yang SKU-nya sama)
 # ----------------------------------------------------------------------
-def awal_doors(sb, machine_id, report_date, shift):
-    """SKU dan status idle tiap pintu dari laporan awal shift yang sama (untuk mengisi awal form). {} kalau tidak ada
-    atau tidak boleh dibaca (mis. 03_batasi_baca_foreman.sql aktif); foreman lalu memilih SKU manual."""
+def shift_doors(sb, machine_id, report_date, shift):
+    """SKU dan status idle tiap pintu menurut laporan terbaru shift itu (awal, lalu perubahan kalau ada).
+    Utama: fungsi database shift_door_skus (06_auto_isi_sku_akhir_shift.sql), jalan juga saat 03 membatasi baca.
+    Cadangan: baca tabel langsung (hanya jalan kalau 03 belum dipasang). {} kalau dua-duanya gagal: SKU dipilih manual."""
     try:
-        rep = sb.table("setting_reports").select("id").eq("machine_id", machine_id) \
-            .eq("report_date", str(report_date)).eq("shift", shift).eq("report_type", "awal").limit(1).execute().data
-        if not rep:
-            return {}
-        rows = sb.table("door_mould_temps").select("door_no, idle, sku_id").eq("report_id", rep[0]["id"]).execute().data
+        rows = sb.rpc("shift_door_skus", {"p_machine_id": machine_id, "p_report_date": str(report_date),
+                                          "p_shift": shift}).execute().data
         return {r["door_no"]: r for r in rows}
+    except Exception:
+        pass
+    try:
+        reps = sb.table("setting_reports").select("id").eq("machine_id", machine_id) \
+            .eq("report_date", str(report_date)).eq("shift", shift) \
+            .in_("report_type", ["awal", "perubahan"]).order("id").execute().data
+        ids = [r["id"] for r in reps]
+        if not ids:
+            return {}
+        rows = sb.table("door_mould_temps").select("report_id, door_no, idle, sku_id") \
+            .in_("report_id", ids).order("report_id").execute().data
+        out = {}
+        for r in rows:                      # laporan yang lebih baru menimpa yang lama
+            out[r["door_no"]] = r
+        return out
     except Exception:
         return {}
 
@@ -415,12 +428,15 @@ def render_results(gen, machine, machine_id, report_date, shift, skus, sb):
     st.caption("Diisi di akhir shift. Cycle count per pintu dibaca dari HMI mesin. Qty hasil diisi per SKU (size) "
                "untuk semua pintu yang memproduksi SKU itu; kalau ada dua pintu dengan SKU sama, qty-nya dibagi rata "
                "ke kedua pintu. Yield dihitung otomatis di database.")
-    pk = f"awalpref_{gen}_{machine}_{report_date}_{shift}"
+    pk = f"shiftpref_{gen}_{machine}_{report_date}_{shift}"
     if pk not in st.session_state:
-        st.session_state[pk] = awal_doors(sb, machine_id, report_date, shift)
+        st.session_state[pk] = shift_doors(sb, machine_id, report_date, shift)
     pref = st.session_state[pk]
     if pref:
-        st.caption("SKU tiap pintu diisi dari laporan awal shift. Ubah kalau pintu itu ganti SKU di tengah shift.")
+        st.caption("SKU tiap pintu otomatis dari laporan awal/perubahan shift ini, tidak perlu dipilih lagi. "
+                   "Centang \"SKU berbeda\" hanya kalau pintu itu ganti SKU di tengah shift tanpa laporan perubahan.")
+    else:
+        st.caption("Laporan awal shift ini tidak ditemukan, jadi SKU tiap pintu dipilih manual.")
     rows, errors = [], []
     for d in oc.DOORS:
         k = f"res_{gen}_{machine}_{d}"
@@ -430,7 +446,14 @@ def render_results(gen, machine, machine_id, report_date, shift, skus, sb):
         if idle:
             st.divider()
             continue
-        sku_id = sku_picker(skus, k, p.get("sku_id"))
+        if p.get("sku_id") is not None:
+            st.write(f"SKU: **{sku_label(skus, p['sku_id'])}**")
+            if st.checkbox("SKU berbeda dari ini", key=f"{k}_chg"):
+                sku_id = sku_picker(skus, k, p["sku_id"])
+            else:
+                sku_id = p["sku_id"]
+        else:
+            sku_id = sku_picker(skus, k)
         cyc = st.number_input("Cycle count (HMI)", min_value=0, step=1, value=None, placeholder="mis. 100",
                               key=f"{k}_cyc")
         if sku_id is None:
