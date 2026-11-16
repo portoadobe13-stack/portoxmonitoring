@@ -83,9 +83,11 @@ def restore_login():
     """Pulihkan login dari cookie setelah halaman di-refresh. True kalau berhasil."""
     if st.session_state.get("_logged_out") or st.session_state.get("_restore_failed"):
         return False
-    rt = sc.read_token()
+    rt = sc.read_token()                 # cara cepat: cookie yang diterima server
     if not rt:
-        return False
+        rt = sc.browser_token()          # cadangan: dibaca dari browser (untuk hosting yang tidak meneruskan cookie)
+    if not rt:
+        return False                     # None = browser belum menjawab; skrip dijalankan ulang otomatis saat sudah
     try:
         sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
         res = sb.auth.refresh_session(rt)
