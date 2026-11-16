@@ -40,3 +40,24 @@ def remember(token):
 def forget():
     _run_js("var p=window.parent, d=p.document;"
             f"d.cookie={json.dumps(COOKIE)}+'=;path=/;max-age=0;SameSite=Lax';")
+
+
+def diagnose():
+    """Tampilkan hasil pemeriksaan cookie (untuk mencari tahu kenapa login tidak bertahan setelah refresh)."""
+    try:
+        names = sorted(st.context.cookies.keys())
+        server = f"Streamlit {st.__version__}. Cookie yang diterima server: {', '.join(names) or '(tidak ada)'}. " \
+                 f"px_rt: {'ADA' if COOKIE in names else 'TIDAK ADA'}."
+    except Exception as e:
+        server = f"Streamlit {st.__version__}. st.context.cookies tidak tersedia ({e}). Perlu streamlit>=1.37."
+    st.caption(server)
+    components.html(
+        "<pre id=o style='font:12px monospace;white-space:pre-wrap;margin:0'></pre><script>"
+        "var out=[];try{var p=window.parent,d=p.document,s=p.location.protocol==='https:';"
+        "out.push('alamat: '+p.location.href.split('?')[0]);"
+        "out.push('cookie px_rt di browser: '+(d.cookie.indexOf('px_rt=')>=0?'ADA':'TIDAK ADA'));"
+        "try{out.push('halaman ada di dalam iframe lain: '+(p!==window.top?'YA':'tidak'));}catch(e){out.push('halaman ada di dalam iframe lain: YA (lintas domain)');}"
+        "d.cookie='px_test=1;path=/;max-age=60;SameSite=Lax'+(s?';Secure':'');"
+        "out.push('tes tulis cookie: '+(d.cookie.indexOf('px_test=')>=0?'BERHASIL':'DIBLOKIR'));}"
+        "catch(e){out.push('GAGAL mengakses halaman induk: '+e.message);}"
+        "document.getElementById('o').innerText=out.join('\\n');</script>", height=110)
