@@ -301,12 +301,18 @@ def render_slot(gen, machine, page, number, engine):
 def render_doors(gen, machine, skus, report_type):
     """Return (include, doors_list, errors). Laporan awal: section wajib + Vacuum check tiap pintu."""
     awal = report_type == "awal"
+    ubah = report_type == "perubahan"
     title = ("🌡️ 6. Suhu Cetakan & Vacuum Check per Pintu (wajib)" if awal
+             else "🌡️ 6. Suhu Cetakan per Pintu (hanya pintu yang berubah)" if ubah
              else "🌡️ 6. Suhu Cetakan per Pintu (input manual)")
     with st.expander(title, expanded=awal):
         if awal:
             include = True
             st.caption("Laporan awal shift: suhu cetakan dan Vacuum check wajib diisi untuk setiap pintu.")
+        elif ubah:
+            include = True
+            st.caption("Centang hanya pintu yang suhu cetakan atau SKU-nya berubah. Pintu yang tidak dicentang "
+                       "dianggap tidak berubah dan tidak perlu diisi.")
         else:
             include = st.checkbox("Sertakan suhu cetakan di laporan ini", value=report_type != "akhir", key=f"inc_{gen}_{machine}_{report_type}")
         doors, errors = [], []
@@ -315,6 +321,9 @@ def render_doors(gen, machine, skus, report_type):
         for d in oc.DOORS:
             k = f"door_{gen}_{machine}_{d}"
             st.markdown(f"**Pintu {d}**")
+            if ubah and not st.checkbox(f"Pintu {d} berubah", key=f"{k}_chg_{report_type}"):
+                st.divider()
+                continue
             idle = st.checkbox(f"Pintu {d} idle (tidak jalan)", key=f"{k}_idle")
             vac = None
             if awal:
@@ -550,13 +559,15 @@ def page_form(sb, master):
         errs = list(door_errors) if include_doors else []
         if report_type == "akhir":
             errs += result_errors
-        if report_type != "akhir" and not verified and not (include_doors and doors):
-            errs.append("Belum ada data yang diverifikasi.")
         if report_type == "perubahan" and not change_reason:
             errs.append("Alasan perubahan wajib untuk laporan 'perubahan'.")
-        mat_payload, mat_errors = mt.clean_rows(mat_rows, report_date,
-                                                required=report_type in ("awal", "perubahan"))
+        mat_payload, mat_errors = mt.clean_rows(mat_rows, report_date, required=report_type == "awal")
         errs += mat_errors
+        if report_type == "perubahan" and not verified and not (include_doors and doors) and not mat_payload:
+            errs.append("Laporan perubahan harus memuat sedikitnya satu hal yang berubah "
+                        "(slot HMI terverifikasi, pintu yang berubah, atau bahan).")
+        if report_type == "awal" and not verified and not (include_doors and doors):
+            errs.append("Belum ada data yang diverifikasi.")
         if errs:
             st.error("Belum bisa disimpan:\n\n" + "\n".join(f"- {e}" for e in errs))
             return
