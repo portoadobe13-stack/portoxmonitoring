@@ -165,13 +165,13 @@ def photo_input(label, key):
 
 
 def pick_engine_bs():
-    """Mesin OCR untuk lembar BS tulisan tangan: model Claude yang lebih teliti sebagai default. Admin boleh memilih."""
+    """Mesin OCR untuk lembar BS tulisan tangan: default Claude Haiku (murah). Admin boleh mengganti ke Sonnet lewat sidebar."""
     engines = available_engines()
     if not engines:
         return None
     labels = list(engines)
-    strong = [l for l in labels if engines[l] == ("claude", CLAUDE_STRONG)]
-    default = strong[0] if strong else labels[0]
+    fast = [l for l in labels if engines[l] == ("claude", CLAUDE_FAST)]
+    default = fast[0] if fast else labels[0]
     if st.session_state.profile["role"] == "admin" and len(labels) > 1:
         default = st.sidebar.selectbox("🔎 Mesin OCR (BS)", labels, index=labels.index(default), key="bs_ocr_engine")
     return (default, *engines[default])
