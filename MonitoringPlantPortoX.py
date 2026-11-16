@@ -17,6 +17,8 @@ import ocr_core as oc
 import materials as mt
 import shift_result as sr
 import session_cookie as sc
+import page_qc
+from ui_common import sku_picker, sku_label, shift_doors
 from rear_camera import rear_camera_input
 
 st.set_page_config(page_title="Porto X Factory System", page_icon="🩴",
@@ -151,6 +153,30 @@ def login_sidebar():
         return False
 
 
+def photo_input(label, key):
+    """Foto dari kamera belakang (HP) atau pilih file (PC). Return (file, id, pakai_kamera)."""
+    use_cam = MOBILE_CAMERA_ONLY and is_mobile()
+    if use_cam:
+        up, fid = rear_camera_input(label, key=key)
+    else:
+        up = st.file_uploader(label, type=["jpg", "jpeg", "png"], key=key)
+        fid = (getattr(up, "file_id", None) or (up.name, up.size)) if up else None
+    return up, fid, use_cam
+
+
+def pick_engine_bs():
+    """Mesin OCR untuk lembar BS tulisan tangan: model Claude yang lebih teliti sebagai default. Admin boleh memilih."""
+    engines = available_engines()
+    if not engines:
+        return None
+    labels = list(engines)
+    strong = [l for l in labels if engines[l] == ("claude", CLAUDE_STRONG)]
+    default = strong[0] if strong else labels[0]
+    if st.session_state.profile["role"] == "admin" and len(labels) > 1:
+        default = st.sidebar.selectbox("🔎 Mesin OCR (BS)", labels, index=labels.index(default), key="bs_ocr_engine")
+    return (default, *engines[default])
+
+
 def load_master(sb):
     if "master" in st.session_state:
         return st.session_state.master
@@ -268,32 +294,6 @@ def render_slot(gen, machine, page, number, engine):
 # ----------------------------------------------------------------------
 # Suhu cetakan per pintu (input manual foreman, tabel door_mould_temps)
 # ----------------------------------------------------------------------
-def sku_picker(skus, key, default_sku=None):
-    """Dropdown Tipe > Warna > Size. default_sku (sku_id) mengisi ketiga dropdown di awal, masih bisa diubah."""
-    if default_sku is not None and f"{key}_m" not in st.session_state:
-        hit = skus[skus.sku_id == default_sku]
-        if not hit.empty:
-            r = hit.iloc[0]
-            st.session_state[f"{key}_m"] = f"{r.model_name} ({r.model_code})"
-            st.session_state[f"{key}_c"] = f"{r.color_name} ({r.color_code})"
-            st.session_state[f"{key}_s"] = f"{r.size_label} ({r.variant})"
-    c1, c2, c3 = st.columns(3)
-    models = skus[["model_code", "model_name"]].drop_duplicates().sort_values("model_code")
-    m_lab = {f"{r.model_name} ({r.model_code})": r.model_code for r in models.itertuples()}
-    with c1:
-        m = st.selectbox("Tipe", list(m_lab), index=None, placeholder="Pilih tipe", key=f"{key}_m")
-    colors = skus[skus.model_code == m_lab[m]] if m else skus.iloc[0:0]
-    col_df = colors[["color_code", "color_name"]].drop_duplicates().sort_values("color_name")
-    c_lab = {f"{r.color_name} ({r.color_code})": r.color_code for r in col_df.itertuples()}
-    with c2:
-        c = st.selectbox("Warna", list(c_lab), index=None, placeholder="Pilih warna", key=f"{key}_c")
-    sizes = colors[colors.color_code == c_lab[c]] if c else skus.iloc[0:0]
-    s_lab = {f"{r.size_label} ({r.variant})": r.sku_id for r in sizes.itertuples()}
-    with c3:
-        s = st.selectbox("Size", list(s_lab), index=None, placeholder="Pilih size", key=f"{key}_s")
-    return int(s_lab[s]) if s else None
-
-
 def render_doors(gen, machine, skus, report_type):
     """Return (include, doors_list, errors). Laporan awal: section wajib + Vacuum check tiap pintu."""
     awal = report_type == "awal"
@@ -387,41 +387,6 @@ def render_materials(gen, report_date):
 # Hasil produksi akhir shift PER PINTU
 #   cycle count per pintu (dari HMI) + qty hasil per SKU (dibagi rata ke pintu yang SKU-nya sama)
 # ----------------------------------------------------------------------
-def shift_doors(sb, machine_id, report_date, shift):
-    """SKU dan status idle tiap pintu menurut laporan terbaru shift itu (awal, lalu perubahan kalau ada).
-    Utama: fungsi database shift_door_skus (06_auto_isi_sku_akhir_shift.sql), jalan juga saat 03 membatasi baca.
-    Cadangan: baca tabel langsung (hanya jalan kalau 03 belum dipasang). {} kalau dua-duanya gagal: SKU dipilih manual."""
-    try:
-        rows = sb.rpc("shift_door_skus", {"p_machine_id": machine_id, "p_report_date": str(report_date),
-                                          "p_shift": shift}).execute().data
-        return {r["door_no"]: r for r in rows}
-    except Exception:
-        pass
-    try:
-        reps = sb.table("setting_reports").select("id").eq("machine_id", machine_id) \
-            .eq("report_date", str(report_date)).eq("shift", shift) \
-            .in_("report_type", ["awal", "perubahan"]).order("id").execute().data
-        ids = [r["id"] for r in reps]
-        if not ids:
-            return {}
-        rows = sb.table("door_mould_temps").select("report_id, door_no, idle, sku_id") \
-            .in_("report_id", ids).order("report_id").execute().data
-        out = {}
-        for r in rows:                      # laporan yang lebih baru menimpa yang lama
-            out[r["door_no"]] = r
-        return out
-    except Exception:
-        return {}
-
-
-def sku_label(skus, sku_id):
-    hit = skus[skus.sku_id == sku_id]
-    if hit.empty:
-        return f"SKU #{sku_id}"
-    r = hit.iloc[0]
-    return f"{r.model_name} {r.color_name} {r.size_label} ({r.variant})"
-
-
 def render_results(gen, machine, machine_id, report_date, shift, skus, sb):
     """Return (payload, errors). payload = {"doors": [...], "skus": [...]} untuk RPC p_results."""
     st.markdown("**📦 Hasil Produksi Shift per Pintu**")
@@ -702,14 +667,24 @@ if login_sidebar():
     menus = []
     if role in FORM_ROLES:
         menus.append("Form Setting Mesin")
+    if role in page_qc.QC_ROLES:
+        menus += ["BS QC - Foto Lembar", "BS QC - Isi Langsung"]
     if role in DASHBOARD_ROLES:
-        menus.append("Dashboard Analisa Manager")
+        menus += ["Dashboard Analisa Manager", "Dashboard BS", "Master Kode BS"]
     if not menus:
         st.warning("Akun Anda belum punya akses ke menu apa pun (role: " + role + "). Hubungi admin.")
     else:
         menu = st.sidebar.selectbox("Pilih Menu", menus)
         if menu == "Form Setting Mesin":
             page_form(sb, master)
+        elif menu == "BS QC - Foto Lembar":
+            page_qc.page_bs_photo(sb, master, pick_engine_bs(), get_client, photo_input)
+        elif menu == "BS QC - Isi Langsung":
+            page_qc.page_bs_form(sb, master)
+        elif menu == "Dashboard BS":
+            page_qc.page_bs_dashboard(sb)
+        elif menu == "Master Kode BS":
+            page_qc.page_bs_codes(sb)
         else:
             page_dashboard(sb)
 else:
