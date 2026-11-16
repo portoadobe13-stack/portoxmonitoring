@@ -126,6 +126,8 @@ def login_sidebar():
                 st.session_state["_logged_out"] = True
                 st.rerun()
             st.caption(f"👤 {prof.get('full_name') or '-'}  ·  role: **{prof['role']}**")
+            with st.expander("🔧 Diagnosa login"):
+                sc.diagnose()
             if st.button("Keluar"):
                 try:
                     st.session_state.sb.auth.sign_out({"scope": "local"})   # hanya perangkat ini
@@ -153,11 +155,11 @@ def login_sidebar():
         return False
 
 
-def photo_input(label, key):
+def photo_input(label, key, max_side=1600):
     """Foto dari kamera belakang (HP) atau pilih file (PC). Return (file, id, pakai_kamera)."""
     use_cam = MOBILE_CAMERA_ONLY and is_mobile()
     if use_cam:
-        up, fid = rear_camera_input(label, key=key)
+        up, fid = rear_camera_input(label, key=key, max_side=max_side)
     else:
         up = st.file_uploader(label, type=["jpg", "jpeg", "png"], key=key)
         fid = (getattr(up, "file_id", None) or (up.name, up.size)) if up else None
@@ -304,7 +306,7 @@ def render_doors(gen, machine, skus, report_type):
             include = True
             st.caption("Laporan awal shift: suhu cetakan dan Vacuum check wajib diisi untuk setiap pintu.")
         else:
-            include = st.checkbox("Sertakan suhu cetakan di laporan ini", value=True, key=f"inc_{gen}_{machine}")
+            include = st.checkbox("Sertakan suhu cetakan di laporan ini", value=report_type != "akhir", key=f"inc_{gen}_{machine}_{report_type}")
         doors, errors = [], []
         if not include:
             return False, doors, errors
@@ -546,7 +548,7 @@ def page_form(sb, master):
         errs = list(door_errors) if include_doors else []
         if report_type == "akhir":
             errs += result_errors
-        if not verified and not (include_doors and doors):
+        if report_type != "akhir" and not verified and not (include_doors and doors):
             errs.append("Belum ada data yang diverifikasi.")
         if report_type == "perubahan" and not change_reason:
             errs.append("Alasan perubahan wajib untuk laporan 'perubahan'.")
