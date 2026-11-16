@@ -9,6 +9,8 @@ Jangan pakai st.cache_data / st.cache_resource untuk login: cache dipakai bersam
 jadi satu orang login = semua orang ikut login sebagai dia.
 """
 import json
+import tempfile
+from pathlib import Path
 from urllib.parse import unquote
 
 import streamlit as st
@@ -34,12 +36,14 @@ def remember(token):
     t = json.dumps(token)
     _run_js("var p=window.parent, d=p.document;"
             f"d.cookie={json.dumps(COOKIE + '=')}+encodeURIComponent({t})+';path=/;max-age={DAYS * 86400};SameSite=Lax'"
-            "+(p.location.protocol==='https:'?';Secure':'');")
+            "+(p.location.protocol==='https:'?';Secure':'');"
+            f"try{{p.localStorage.setItem({json.dumps(COOKIE)},{t});}}catch(e){{}}")
 
 
 def forget():
     _run_js("var p=window.parent, d=p.document;"
-            f"d.cookie={json.dumps(COOKIE)}+'=;path=/;max-age=0;SameSite=Lax';")
+            f"d.cookie={json.dumps(COOKIE)}+'=;path=/;max-age=0;SameSite=Lax';"
+            f"try{{p.localStorage.removeItem({json.dumps(COOKIE)});}}catch(e){{}}")
 
 
 def diagnose():
@@ -61,3 +65,41 @@ def diagnose():
         "out.push('tes tulis cookie: '+(d.cookie.indexOf('px_test=')>=0?'BERHASIL':'DIBLOKIR'));}"
         "catch(e){out.push('GAGAL mengakses halaman induk: '+e.message);}"
         "document.getElementById('o').innerText=out.join('\\n');</script>", height=110)
+
+
+# ----------------------------------------------------------------------
+# Pembaca token di sisi BROWSER. Dipakai karena di beberapa hosting (mis. Streamlit Community Cloud)
+# server tidak menerima cookie lewat st.context.cookies. Komponen kecil ini membaca cookie/localStorage
+# di browser dan mengirim nilainya ke Python.
+# ----------------------------------------------------------------------
+_READER_HTML = """<!doctype html><html><body><script>
+var sent=false;
+function send(t,d){window.parent.postMessage(Object.assign({isStreamlitMessage:true,type:t},d||{}),"*");}
+function readTok(){var t="";try{var p=window.parent;
+  var m=p.document.cookie.match(/(?:^|; )px_rt=([^;]*)/); if(m) t=decodeURIComponent(m[1]);
+  if(!t){try{t=p.localStorage.getItem("px_rt")||"";}catch(e){}}}catch(e){}return t;}
+window.addEventListener("message",function(e){
+  if(e.data&&e.data.type==="streamlit:render"&&!sent){sent=true;
+    send("streamlit:setComponentValue",{value:{token:readTok()},dataType:"json"});}});
+send("streamlit:componentReady",{apiVersion:1});
+send("streamlit:setFrameHeight",{height:0});
+</script></body></html>"""
+
+_reader = None
+try:
+    _rdir = Path(tempfile.gettempdir()) / "porto_cookie_reader_v1"
+    _rdir.mkdir(parents=True, exist_ok=True)
+    (_rdir / "index.html").write_text(_READER_HTML, encoding="utf-8")
+    _reader = components.declare_component("porto_cookie_reader_v1", path=str(_rdir))
+except Exception:
+    _reader = None
+
+
+def browser_token():
+    """None = browser belum menjawab (tunggu rerun berikutnya); '' = tidak ada token tersimpan; selain itu token."""
+    if _reader is None:
+        return ""
+    val = _reader(key="px_cookie_reader", default=None)
+    if not isinstance(val, dict):
+        return None
+    return val.get("token") or ""
