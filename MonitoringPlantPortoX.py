@@ -299,7 +299,8 @@ def render_slot(gen, machine, page, number, engine):
 # Suhu cetakan per pintu (input manual foreman, tabel door_mould_temps)
 # ----------------------------------------------------------------------
 def render_doors(gen, machine, skus, report_type):
-    """Return (include, doors_list, errors). Laporan awal: section wajib + Vacuum check tiap pintu."""
+    """Return (include, doors_list, errors). Laporan awal: section wajib + Vacuum check tiap cetakan.
+    Satu pintu bisa menjalankan 2 cetakan (kanan + kiri), tiap cetakan 1 atau 2 size (maksimal 4 pasang per siklus)."""
     awal = report_type == "awal"
     ubah = report_type == "perubahan"
     title = ("🌡️ 6. Suhu Cetakan & Vacuum Check per Pintu (wajib)" if awal
@@ -308,13 +309,16 @@ def render_doors(gen, machine, skus, report_type):
     with st.expander(title, expanded=awal):
         if awal:
             include = True
-            st.caption("Laporan awal shift: suhu cetakan dan Vacuum check wajib diisi untuk setiap pintu.")
+            st.caption("Laporan awal shift: suhu cetakan dan Vacuum check wajib diisi untuk setiap pintu. "
+                       "Biasanya satu pintu = satu cetakan = satu size. Kalau pintu menjalankan 2 cetakan atau "
+                       "2 size, centang pilihannya di pintu itu.")
         elif ubah:
             include = True
             st.caption("Centang hanya pintu yang suhu cetakan atau SKU-nya berubah. Pintu yang tidak dicentang "
                        "dianggap tidak berubah dan tidak perlu diisi.")
         else:
-            include = st.checkbox("Sertakan suhu cetakan di laporan ini", value=report_type != "akhir", key=f"inc_{gen}_{machine}_{report_type}")
+            include = st.checkbox("Sertakan suhu cetakan di laporan ini", value=report_type != "akhir",
+                                  key=f"inc_{gen}_{machine}_{report_type}")
         doors, errors = [], []
         if not include:
             return False, doors, errors
@@ -325,41 +329,61 @@ def render_doors(gen, machine, skus, report_type):
                 st.divider()
                 continue
             idle = st.checkbox(f"Pintu {d} idle (tidak jalan)", key=f"{k}_idle")
-            vac = None
-            if awal:
-                # sengaja tanpa nilai awal: foreman harus memilih sendiri tiap pintu
-                vac = st.selectbox("Vacuum check", ["aktif", "nonaktif"], index=None,
-                                   placeholder="Pilih status", key=f"{k}_vac")
-                if vac is None:
-                    errors.append(f"Pintu {d}: Vacuum check wajib dipilih")
             if idle:
+                vac = None
+                if awal:
+                    vac = st.selectbox("Vacuum check", ["aktif", "nonaktif"], index=None,
+                                       placeholder="Pilih status", key=f"{k}_vac")
+                    if vac is None:
+                        errors.append(f"Pintu {d}: Vacuum check wajib dipilih")
                 doors.append({"door_no": d, "idle": True, "vacuum_check": vac})
                 st.divider()
                 continue
-            sku_id = sku_picker(skus, k)
-            c1, c2, c3 = st.columns(3)
-            side = c1.selectbox("Sisi aktif", ["kanan", "kiri"], key=f"{k}_side")
-            svu = c2.number_input("SV atas (°C)", value=None, step=1.0, min_value=0.0, key=f"{k}_svu")
-            svl = c3.number_input("SV bawah (°C)", value=None, step=1.0, min_value=0.0, key=f"{k}_svl")
-            p1, p2 = st.columns(2)
-            pvu_ok = p1.checkbox("PV atas sesuai (±3°C)", value=True, key=f"{k}_pvuok")
-            pvu = None if pvu_ok else p1.number_input("PV atas aktual (°C)", value=None, key=f"{k}_pvu")
-            pvl_ok = p2.checkbox("PV bawah sesuai (±3°C)", value=True, key=f"{k}_pvlok")
-            pvl = None if pvl_ok else p2.number_input("PV bawah aktual (°C)", value=None, key=f"{k}_pvl")
+            two = st.checkbox("Pintu ini menjalankan 2 cetakan (kanan dan kiri)", key=f"{k}_two")
+            moulds = []
+            for mi in ((1, 2) if two else (1,)):
+                pre = f"{k}_m{mi}"
+                who = f"Pintu {d}" + (f" cetakan {mi}" if two else "")
+                if two:
+                    st.markdown(f"*Cetakan {mi} ({'kanan' if mi == 1 else 'kiri'})*")
+                vac = None
+                if awal:
+                    # sengaja tanpa nilai awal: foreman harus memilih sendiri tiap cetakan
+                    vac = st.selectbox("Vacuum check", ["aktif", "nonaktif"], index=None,
+                                       placeholder="Pilih status", key=f"{pre}_vac")
+                    if vac is None:
+                        errors.append(f"{who}: Vacuum check wajib dipilih")
+                side = (("kanan" if mi == 1 else "kiri") if two
+                        else st.selectbox("Sisi aktif", ["kanan", "kiri"], key=f"{pre}_side"))
+                two_sizes = st.checkbox("Cetakan ini menjalankan 2 size", key=f"{pre}_two")
+                sku_ids = []
+                for si in ((1, 2) if two_sizes else (1,)):
+                    if two_sizes:
+                        st.caption(f"Size {si}")
+                    sku_ids.append(sku_picker(skus, f"{pre}_s{si}"))
+                c1, c2, c3 = st.columns(3)
+                svu = c2.number_input("SV atas (°C)", value=None, step=1.0, min_value=0.0, key=f"{pre}_svu")
+                svl = c3.number_input("SV bawah (°C)", value=None, step=1.0, min_value=0.0, key=f"{pre}_svl")
+                p1, p2 = st.columns(2)
+                pvu_ok = p1.checkbox("PV atas sesuai (±3°C)", value=True, key=f"{pre}_pvuok")
+                pvu = None if pvu_ok else p1.number_input("PV atas aktual (°C)", value=None, key=f"{pre}_pvu")
+                pvl_ok = p2.checkbox("PV bawah sesuai (±3°C)", value=True, key=f"{pre}_pvlok")
+                pvl = None if pvl_ok else p2.number_input("PV bawah aktual (°C)", value=None, key=f"{pre}_pvl")
 
-            if sku_id is None:
-                errors.append(f"Pintu {d}: SKU belum dipilih")
-            if svu is None or svl is None:
-                errors.append(f"Pintu {d}: SV atas dan bawah wajib diisi")
-            if not pvu_ok and pvu is None:
-                errors.append(f"Pintu {d}: isi PV atas atau centang 'sesuai'")
-            if not pvl_ok and pvl is None:
-                errors.append(f"Pintu {d}: isi PV bawah atau centang 'sesuai'")
-            doors.append({"door_no": d, "idle": False, "sku_id": sku_id, "side": side,
-                          "sv_upper": svu, "sv_lower": svl,
-                          "pv_upper_ok": pvu_ok, "pv_upper": pvu,
-                          "pv_lower_ok": pvl_ok, "pv_lower": pvl,
-                          "vacuum_check": vac})
+                if any(x is None for x in sku_ids):
+                    errors.append(f"{who}: SKU belum dipilih")
+                elif len(sku_ids) == 2 and sku_ids[0] == sku_ids[1]:
+                    errors.append(f"{who}: size 1 dan size 2 sama, pilih size yang berbeda")
+                if svu is None or svl is None:
+                    errors.append(f"{who}: SV atas dan bawah wajib diisi")
+                if not pvu_ok and pvu is None:
+                    errors.append(f"{who}: isi PV atas atau centang 'sesuai'")
+                if not pvl_ok and pvl is None:
+                    errors.append(f"{who}: isi PV bawah atau centang 'sesuai'")
+                moulds.append({"mould_no": mi, "side": side, "sv_upper": svu, "sv_lower": svl,
+                               "pv_upper_ok": pvu_ok, "pv_upper": pvu, "pv_lower_ok": pvl_ok, "pv_lower": pvl,
+                               "vacuum_check": vac, "skus": sku_ids})
+            doors.append({"door_no": d, "idle": False, "moulds": moulds})
             st.divider()
     return True, doors, errors
 
@@ -401,18 +425,20 @@ def render_materials(gen, report_date):
 #   cycle count per pintu (dari HMI) + qty hasil per SKU (dibagi rata ke pintu yang SKU-nya sama)
 # ----------------------------------------------------------------------
 def render_results(gen, machine, machine_id, report_date, shift, skus, sb):
-    """Return (payload, errors). payload = {"doors": [...], "skus": [...]} untuk RPC p_results."""
+    """Return (payload, errors). payload = {"doors": [...], "skus": [...]} untuk RPC p_results.
+    Tiap pintu: cycle count dan daftar SKU per pasang per siklus (1 sampai 4)."""
     st.markdown("**📦 Hasil Produksi Shift per Pintu**")
-    st.caption("Diisi di akhir shift. Cycle count per pintu dibaca dari HMI mesin. Qty hasil diisi per SKU (size) "
-               "untuk semua pintu yang memproduksi SKU itu; kalau ada dua pintu dengan SKU sama, qty-nya dibagi rata "
-               "ke kedua pintu. Yield dihitung otomatis di database.")
+    st.caption("Diisi di akhir shift. Cycle count per pintu dibaca dari HMI mesin. Qty hasil diisi per SKU (size), "
+               "dalam PASANG, untuk semua pintu yang memproduksi SKU itu. Kalau SKU yang sama dijalankan di lebih dari "
+               "satu pintu atau cetakan, qty-nya dibagi rata. Yield dihitung otomatis di database.")
     pk = f"shiftpref_{gen}_{machine}_{report_date}_{shift}"
     if pk not in st.session_state:
         st.session_state[pk] = shift_doors(sb, machine_id, report_date, shift)
     pref = st.session_state[pk]
     if pref:
         st.caption("SKU tiap pintu otomatis dari laporan awal/perubahan shift ini, tidak perlu dipilih lagi. "
-                   "Centang \"SKU berbeda\" hanya kalau pintu itu ganti SKU di tengah shift tanpa laporan perubahan.")
+                   "Centang \"SKU berbeda\" hanya kalau pintu itu ganti SKU atau jumlah size di tengah shift "
+                   "tanpa laporan perubahan.")
     else:
         st.caption("Laporan awal shift ini tidak ditemukan, jadi SKU tiap pintu dipilih manual.")
     rows, errors = [], []
@@ -424,31 +450,43 @@ def render_results(gen, machine, machine_id, report_date, shift, skus, sb):
         if idle:
             st.divider()
             continue
-        if p.get("sku_id") is not None:
-            st.write(f"SKU: **{sku_label(skus, p['sku_id'])}**")
-            if st.checkbox("SKU berbeda dari ini", key=f"{k}_chg"):
-                sku_id = sku_picker(skus, k, p["sku_id"])
-            else:
-                sku_id = p["sku_id"]
+        default_ids = list(p.get("sku_ids") or [])
+        if default_ids:
+            st.write("SKU: " + "  +  ".join(f"**{sku_label(skus, sid)}**" for sid in default_ids))
+            if len(default_ids) > 1:
+                st.caption(f"{len(default_ids)} pasang per siklus")
+            change = st.checkbox("SKU berbeda dari ini", key=f"{k}_chg")
         else:
-            sku_id = sku_picker(skus, k)
+            change = True
+        if change:
+            n = int(st.number_input("Pasang per siklus (jumlah size yang jalan di pintu ini)", min_value=1,
+                                    max_value=4, step=1, value=max(len(default_ids), 1), key=f"{k}_n"))
+            sku_ids = []
+            for i in range(n):
+                if n > 1:
+                    st.caption(f"Pasang {i + 1}")
+                sku_ids.append(sku_picker(skus, f"{k}_p{i}", default_ids[i] if i < len(default_ids) else None))
+        else:
+            sku_ids = default_ids
         cyc = st.number_input("Cycle count (HMI)", min_value=0, step=1, value=None, placeholder="mis. 100",
                               key=f"{k}_cyc")
-        if sku_id is None:
+        if any(x is None for x in sku_ids):
             errors.append(f"Pintu {d}: SKU belum dipilih (atau centang idle)")
         if cyc is None or cyc < 1:
             errors.append(f"Pintu {d}: cycle count wajib diisi (atau centang idle)")
-        if sku_id is not None and cyc is not None and cyc >= 1:
-            rows.append({"door_no": d, "sku_id": sku_id, "cycle_count": int(cyc)})
+        if sku_ids and all(x is not None for x in sku_ids) and cyc is not None and cyc >= 1:
+            rows.append({"door_no": d, "cycle_count": int(cyc), "sku_ids": [int(x) for x in sku_ids]})
         st.divider()
 
     qty = {}
     groups = sr.group_doors(rows)
     if groups:
-        st.markdown("**Qty hasil per SKU**")
-        for sid, ds in groups.items():
-            q = st.number_input(f"{sku_label(skus, sid)}  |  pintu {', '.join(str(x['door_no']) for x in ds)}",
-                                min_value=0, step=1, value=None, placeholder="total qty SKU ini",
+        st.markdown("**Qty hasil per SKU (pasang)**")
+        for sid, sl in groups.items():
+            doors_txt = ", ".join(str(x) for x in sorted({s["door_no"] for s in sl}))
+            extra = f" ({len(sl)} slot)" if len(sl) > len({s["door_no"] for s in sl}) or len(sl) > 1 else ""
+            q = st.number_input(f"{sku_label(skus, sid)}  |  pintu {doors_txt}{extra}",
+                                min_value=0, step=1, value=None, placeholder="total qty SKU ini (pasang)",
                                 key=f"resq_{gen}_{machine}_{sid}")
             qty[sid] = int(q) if q is not None else None
     e2, warns = sr.validate_results(rows, qty)
@@ -459,28 +497,34 @@ def render_results(gen, machine, machine_id, report_date, shift, skus, sb):
     prev = sr.preview(rows, qty)
     if prev and all(x["qty_door"] is not None for x in prev):
         st.dataframe(pd.DataFrame([{
-            "Pintu": x["door_no"], "SKU": sku_label(skus, x["sku_id"]), "Cycle": x["cycle_count"],
-            "Pintu dgn SKU sama": x["doors_same_sku"], "Qty pintu": x["qty_door"],
-            "Yield pintu %": x["yield_door"], "Yield SKU %": x["yield_sku"]} for x in prev]), hide_index=True)
+            "Pintu": x["door_no"], "SKU": "  +  ".join(sku_label(skus, sid) for sid in x["sku_ids"]),
+            "Cycle": x["cycle_count"], "Pasang/siklus": x["pairs"], "Qty pintu": x["qty_door"],
+            "Yield pintu %": x["yield_door"]} for x in prev]), hide_index=True)
+        st.dataframe(pd.DataFrame([{
+            "SKU": sku_label(skus, x["sku_id"]), "Pintu": ", ".join(str(n) for n in x["doors"]),
+            "Slot": x["slots"], "Qty": x["qty"], "Total cycle slot": x["cycles"],
+            "Yield SKU %": x["yield_sku"]} for x in sr.preview_sku(rows, qty)]), hide_index=True)
         tot = sr.shift_yield(rows, qty)
         if tot:
-            st.info(f"Yield mesin: **{tot[2]:.1f}%** (qty {tot[1]} ÷ cycle {tot[0]})")
-        if any(x["doors_same_sku"] > 1 for x in prev):
-            st.caption("Pintu yang SKU-nya sama berbagi qty, jadi yield pintu hanya perkiraan. "
-                       "Yield SKU lebih tepat untuk pintu-pintu itu.")
+            st.info(f"Yield mesin: **{tot[3]:.1f}%** (qty {tot[2]} ÷ kapasitas {tot[1]} = cycle × pasang per siklus)")
+        if any(len(g) > 1 for g in groups.values()):
+            st.caption("SKU yang dijalankan di lebih dari satu slot berbagi qty secara rata, jadi yield pintu hanya "
+                       "perkiraan. Yield SKU lebih tepat untuk SKU itu.")
     payload = {"doors": rows, "skus": [{"sku_id": sid, "qty_hasil": q} for sid, q in qty.items() if q is not None]}
     return payload, errors
 
 
 def schema_ready(sb):
-    """Pastikan 05_vacuum_check_dan_hasil_per_pintu.sql sudah dijalankan; kalau belum, data vacuum dan
+    """Pastikan 05_vacuum_check_dan_hasil_per_pintu.sql dan 09_multi_cetakan_multi_size.sql sudah dijalankan; kalau belum, data vacuum dan
     hasil produksi akan diam-diam hilang (fungsi lama mengabaikan field yang tidak dikenal)."""
     if st.session_state.get("schema05"):
         return True
     try:
         sb.table("report_door_results").select("report_id").limit(1).execute()
         sb.table("report_sku_output").select("report_id").limit(1).execute()
-        sb.table("door_mould_temps").select("vacuum_check").limit(1).execute()
+        sb.table("door_mould_temps").select("vacuum_check, mould_no").limit(1).execute()
+        sb.table("door_mould_skus").select("report_id").limit(1).execute()
+        sb.table("report_door_slots").select("report_id").limit(1).execute()
     except Exception:
         return False
     st.session_state["schema05"] = True
@@ -551,9 +595,10 @@ def page_form(sb, master):
         st.write("**Belum diverifikasi (tidak ikut disimpan):** " + ", ".join(pending))
 
     if st.button("💾 Simpan Laporan Setting Mesin", type="primary"):
-        if report_type in ("awal", "akhir") and not schema_ready(sb):
-            st.error("Database belum diperbarui untuk Vacuum check dan hasil produksi per pintu. Jalankan "
-                     "05_vacuum_check_dan_hasil_per_pintu.sql di Supabase → SQL Editor, lalu coba simpan lagi. "
+        if not schema_ready(sb):
+            st.error("Database belum diperbarui untuk Vacuum check, hasil produksi per pintu, dan pintu dengan "
+                     "2 cetakan / 2 size. Jalankan 05_vacuum_check_dan_hasil_per_pintu.sql dan "
+                     "09_multi_cetakan_multi_size.sql di Supabase → SQL Editor, lalu coba simpan lagi. "
                      "(Laporan belum disimpan.)")
             return
         errs = list(door_errors) if include_doors else []
@@ -647,18 +692,23 @@ def page_dashboard(sb):
         st.caption("Data bahan per sak belum tersedia (jalankan 04_bahan_per_sak.sql).")
     try:
         yr = sb.table("v_door_yield").select(
-            "door_no, sku_code, cycle_count, doors_same_sku, qty_sku_total, qty_door, yield_door_pct, "
-            "yield_sku_pct, shared_sku, sku_changed, sv_upper, sv_lower, vacuum_check"
-        ).eq("report_id", rid).order("door_no").execute().data
+            "door_no, slot_no, sku_code, cycle_count, pairs_per_cycle, slots_same_sku, qty_sku_total, qty_slot, "
+            "qty_door, yield_door_pct, yield_sku_pct, shared_sku, sku_changed, sv_upper, sv_lower, "
+            "vacuum_check, n_cetakan"
+        ).eq("report_id", rid).order("door_no").order("slot_no").execute().data
         if yr:
-            sy = sb.table("v_shift_yield").select("total_cycle, total_qty, yield_pct").eq("report_id", rid).execute().data
+            sy = sb.table("v_shift_yield").select("total_cycle, total_capacity, total_qty, yield_pct") \
+                .eq("report_id", rid).execute().data
             st.markdown("**Hasil produksi per pintu (laporan akhir)**")
             if sy:
                 st.metric("Yield mesin", f"{sy[0]['yield_pct']}%",
-                          f"qty {sy[0]['total_qty']} ÷ cycle {sy[0]['total_cycle']}", delta_color="off")
+                          f"qty {sy[0]['total_qty']} ÷ kapasitas {sy[0]['total_capacity']} (cycle × pasang/siklus)",
+                          delta_color="off")
             st.dataframe(pd.DataFrame(yr), hide_index=True)
             st.caption("sv_upper/sv_lower dan vacuum_check diambil dari laporan awal shift yang sama. "
-                       "shared_sku = pintu berbagi SKU (pakai yield_sku_pct); sku_changed = SKU pintu berubah sejak awal shift.")
+                       "Satu baris = satu slot (size pada satu cetakan). pairs_per_cycle = jumlah slot pintu itu; qty_door dan "
+                       "yield_door_pct berlaku untuk seluruh pintu. shared_sku = SKU dipakai >1 slot (pakai yield_sku_pct); "
+                       "sku_changed = SKU slot ini tidak ada di laporan awal pintu itu.")
     except Exception:
         pass
     try:
