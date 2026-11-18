@@ -28,14 +28,27 @@ def sku_picker(skus, key, default_sku=None):
     return int(s_lab[s]) if s else None
 
 
+def _group_slots(rows):
+    """Baris slot -> {door_no: {"idle": bool, "sku_ids": [sku_id per slot, urut cetakan lalu size], "sku_id": slot pertama}}."""
+    out = {}
+    for r in rows:
+        d = out.setdefault(r["door_no"], {"idle": bool(r.get("idle")), "sku_ids": []})
+        if r.get("sku_id") is not None:
+            d["sku_ids"].append(int(r["sku_id"]))
+    for d in out.values():
+        d["sku_id"] = d["sku_ids"][0] if d["sku_ids"] else None
+    return out
+
+
 def shift_doors(sb, machine_id, report_date, shift):
-    """SKU dan status idle tiap pintu menurut laporan terbaru shift itu (awal, lalu perubahan kalau ada).
-    Utama: fungsi database shift_door_skus (06_auto_isi_sku_akhir_shift.sql), jalan juga saat 03 membatasi baca.
+    """SKU tiap pintu menurut laporan terbaru shift itu (awal, lalu perubahan kalau ada).
+    Satu pintu bisa punya 1 sampai 4 slot (2 cetakan x 2 size): hasilnya {door_no: {"idle", "sku_ids", "sku_id"}}.
+    Utama: fungsi database shift_door_skus (06 dan 09), jalan juga saat 03 membatasi baca.
     Cadangan: baca tabel langsung (hanya jalan kalau 03 belum dipasang). {} kalau dua-duanya gagal: SKU dipilih manual."""
     try:
         rows = sb.rpc("shift_door_skus", {"p_machine_id": machine_id, "p_report_date": str(report_date),
                                           "p_shift": shift}).execute().data
-        return {r["door_no"]: r for r in rows}
+        return _group_slots(rows)
     except Exception:
         pass
     try:
@@ -45,14 +58,35 @@ def shift_doors(sb, machine_id, report_date, shift):
         ids = [r["id"] for r in reps]
         if not ids:
             return {}
-        rows = sb.table("door_mould_temps").select("report_id, door_no, idle, sku_id") \
+        temps = sb.table("door_mould_temps").select("report_id, door_no, idle") \
             .in_("report_id", ids).order("report_id").execute().data
-        out = {}
-        for r in rows:                      # laporan yang lebih baru menimpa yang lama
-            out[r["door_no"]] = r
-        return out
+        latest = {}                         # laporan yang lebih baru menimpa yang lama
+        for r in temps:
+            latest[r["door_no"]] = (r["report_id"], bool(r.get("idle")))
+        sk = sb.table("door_mould_skus").select("report_id, door_no, mould_no, size_no, sku_id") \
+            .in_("report_id", ids).order("mould_no").order("size_no").execute().data
+        rows = []
+        for door, (rid, idle) in sorted(latest.items()):
+            mine = [x for x in sk if x["report_id"] == rid and x["door_no"] == door]
+            if idle or not mine:
+                rows.append({"door_no": door, "idle": idle, "sku_id": None})
+            rows += [{"door_no": door, "idle": False, "sku_id": x["sku_id"]} for x in mine]
+        return _group_slots(rows)
     except Exception:
         return {}
+
+
+def running_skus(pref):
+    """{sku_id: [nomor pintu unik, urut]} untuk pintu yang tidak idle (dipakai form BS QC)."""
+    out = {}
+    for d in sorted(pref):
+        r = pref[d]
+        if r.get("idle"):
+            continue
+        for sid in r.get("sku_ids") or ([r["sku_id"]] if r.get("sku_id") is not None else []):
+            if d not in out.setdefault(sid, []):
+                out[sid].append(d)
+    return out
 
 
 def sku_label(skus, sku_id):

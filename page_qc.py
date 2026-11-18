@@ -12,7 +12,7 @@ import bs_form
 import bs_logic as bl
 import bs_ocr as bo
 import ocr_core as oc
-from ui_common import shift_doors, sku_label, sku_picker
+from ui_common import running_skus, shift_doors, sku_label, sku_picker
 
 TZ = ZoneInfo("Asia/Jakarta")
 QC_ROLES = ("qc", "admin")
@@ -85,11 +85,7 @@ def page_bs_form(sb, master):
     if pk not in st.session_state:
         st.session_state[pk] = shift_doors(sb, machine_id, report_date, shift)
     pref = st.session_state[pk]
-    running = {}
-    for d in sorted(pref):
-        r = pref[d]
-        if not r.get("idle") and r.get("sku_id") is not None:
-            running.setdefault(r["sku_id"], []).append(d)
+    running = running_skus(pref)
 
     base0 = f"bs_{gen}_{machine}_{report_date}_{shift}_{checkpoint}"
     st.markdown("---")
@@ -198,7 +194,7 @@ def page_bs_photo(sb, master, engine, get_client, photo_input):
                "Satu foto boleh dikirim lebih dari sekali (misalnya setelah tiap jam pemeriksaan); "
                "pemeriksaan yang sudah tersimpan tidak akan disimpan ulang.")
     state = st.session_state.setdefault(f"bsp_{gen}", {"parsed": None, "scan_no": 0})
-    up, fid, use_cam = photo_input("Foto lembar QC", f"bsp_photo_{gen}")
+    up, fid, use_cam = photo_input("Foto lembar QC", f"bsp_photo_{gen}", max_side=bo.MAX_SIDE)
     if up:
         cached = state.get("img")
         if cached is None or cached[0] != fid:
@@ -252,7 +248,7 @@ def page_bs_photo(sb, master, engine, get_client, photo_input):
     if pk not in st.session_state:
         st.session_state[pk] = shift_doors(sb, machine_id, report_date, shift)
     pref = st.session_state[pk]
-    run_ids = sorted({r["sku_id"] for r in pref.values() if not r.get("idle") and r.get("sku_id") is not None})
+    run_ids = sorted(running_skus(pref))
     recs = skus.to_dict("records")
     all_c = [{"sku_id": int(r["sku_id"]), "model_code": r["model_code"], "color_code": r["color_code"],
               "size_label": r["size_label"]} for r in recs]
