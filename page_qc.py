@@ -354,10 +354,10 @@ def page_bs_dashboard(sb):
     rng = st.date_input("Periode", (date.today() - timedelta(days=6), date.today()), format="DD/MM/YYYY")
     d1, d2 = (rng[0], rng[-1]) if isinstance(rng, (tuple, list)) and rng else (rng, rng)
     try:
-        shift_rows = sb.table("v_bs_shift_sku").select("*").gte("report_date", str(d1)).lte("report_date", str(d2)) \
+        shift_rows = sb.table("v_qc_shift_sku").select("*").gte("report_date", str(d1)).lte("report_date", str(d2)) \
             .order("report_date", desc=True).limit(3000).execute().data
     except Exception as e:
-        st.error(f"Gagal memuat (sudah menjalankan 07_qc_bs.sql?): {e}")
+        st.error(f"Gagal memuat (sudah menjalankan 07 dan 10?): {e}")
         return
     if not shift_rows:
         st.info("Belum ada laporan BS pada periode ini.")
@@ -370,18 +370,20 @@ def page_bs_dashboard(sb):
         st.info("Tidak ada data untuk mesin yang dipilih.")
         return
 
-    with_qty = df[df["qty_hasil"].notna() & (df["qty_hasil"] > 0)]
+    df["qty_dasar"] = df["qty_qc"].where(df["qty_qc"] > 0, df["qty_foreman"])
+    with_qty = df[df["qty_dasar"].notna() & (df["qty_dasar"] > 0)]
     m1, m2, m3 = st.columns(3)
     m1.metric("Total BS (pcs)", int(df["bs_qty"].sum()))
     m2.metric("Total TS (pcs)", int(df["ts_qty"].sum()))
     if len(with_qty):
-        m3.metric("BS ÷ qty hasil", f"{with_qty['bs_qty'].sum() * 100.0 / with_qty['qty_hasil'].sum():.2f}%",
-                  help="Hanya shift yang sudah punya laporan akhir foreman.")
+        m3.metric("BS ÷ qty hasil (sementara)", f"{with_qty['bs_qty'].sum() * 100.0 / with_qty['qty_dasar'].sum():.2f}%",
+                  help="Sementara: BS pcs ÷ qty hasil (QC kalau ada, kalau tidak foreman). Satuan dan penyebut "
+                       "menunggu keputusan tim pabrik.")
     st.markdown("**Per shift per SKU**")
-    st.dataframe(df.drop(columns=["machine_id", "sku_id"], errors="ignore"), hide_index=True)
+    st.dataframe(df.drop(columns=["machine_id", "sku_id", "qty_dasar"], errors="ignore"), hide_index=True)
 
     try:
-        det = pd.DataFrame(sb.table("v_bs_detail").select("report_date, machine_code, sku_code, bs_code, bs_name, qty")
+        det = pd.DataFrame(sb.table("v_qc_detail").select("report_date, machine_code, sku_code, bs_code, bs_name, qty")
                            .gte("report_date", str(d1)).lte("report_date", str(d2)).limit(20000).execute().data)
         det = det[det["bs_code"].notna() & det["machine_code"].isin(pick)] if len(det) else det
         if len(det):
@@ -419,7 +421,7 @@ def page_bs_codes(sb):
     try:
         rows = sb.table("bs_codes").select("code, name, sort_order, active").order("sort_order").execute().data
     except Exception as e:
-        st.error(f"Gagal memuat (sudah menjalankan 07_qc_bs.sql?): {e}")
+        st.error(f"Gagal memuat (sudah menjalankan 07 dan 10?): {e}")
         return
     df = pd.DataFrame(rows, columns=["code", "name", "sort_order", "active"])
     edited = st.data_editor(

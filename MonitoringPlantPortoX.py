@@ -18,6 +18,7 @@ import materials as mt
 import shift_result as sr
 import session_cookie as sc
 import page_qc
+import page_qc_input
 from ui_common import sku_picker, sku_label, shift_doors
 from rear_camera import rear_camera_input
 
@@ -733,7 +734,7 @@ if login_sidebar():
     if role in FORM_ROLES:
         menus.append("Form Setting Mesin")
     if role in page_qc.QC_ROLES:
-        menus += ["BS QC - Foto Lembar", "BS QC - Isi Langsung"]
+        menus += ["Input QC (Hasil & BS)", "BS QC - Foto Lembar", "BS QC - Isi Langsung"]
     if role in DASHBOARD_ROLES:
         menus += ["Dashboard Analisa Manager", "Dashboard BS", "Master Kode BS"]
     if not menus:
@@ -742,6 +743,8 @@ if login_sidebar():
         menu = st.sidebar.selectbox("Pilih Menu", menus)
         if menu == "Form Setting Mesin":
             page_form(sb, master)
+        elif menu == "Input QC (Hasil & BS)":
+            page_qc_input.page_qc_input(sb, master)
         elif menu == "BS QC - Foto Lembar":
             page_qc.page_bs_photo(sb, master, pick_engine_bs(), get_client, photo_input)
         elif menu == "BS QC - Isi Langsung":
